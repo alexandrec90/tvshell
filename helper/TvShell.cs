@@ -68,6 +68,62 @@ static class Game {
     }
 }
 
+// Which display is the TV. tv.cfg beside the exe (`monitor=<EDID code>[,<code>...]`) names it by
+// the monitor's identity, so an extra or swapped display can never be taken for the TV. Without
+// tv.cfg the TV is the non-primary display only when there are exactly two; anything else means
+// "no TV", and the helper leaves every window where it is rather than guess.
+static class TvDisplay {
+    public static string[] Wanted = new string[0];
+    static string lastLogged;
+
+    public static void Load(string path) {
+        if (!File.Exists(path)) { Cfg.Log("tv.cfg: none, TV = the other display when exactly two"); return; }
+        foreach (var raw in File.ReadAllLines(path)) {
+            var line = raw.Trim();
+            int eq = line.IndexOf('=');
+            if (line.StartsWith("#") || eq <= 0) continue;
+            if (line.Substring(0, eq).Trim().ToLowerInvariant() == "monitor")
+                Wanted = line.Substring(eq + 1).Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+        }
+        Cfg.Log("tv.cfg: TV monitor " + (Wanted.Length > 0 ? string.Join(",", Wanted) : "(none set)"));
+    }
+
+    // Pure choice: the index of the TV among displays (ids[i] = monitor interface path, primary[i]),
+    // or -1. A wanted code matches a whole '#'-separated segment of the id, case-insensitively, and
+    // a primary display is never the TV.
+    public static int Pick(string[] ids, bool[] primary, string[] wanted) {
+        if (wanted.Length > 0) {
+            for (int i = 0; i < ids.Length; i++) {
+                if (primary[i]) continue;
+                var segs = (ids[i] ?? "").Split('#', '\\');
+                if (wanted.Any(w => segs.Any(s => string.Equals(s, w, StringComparison.OrdinalIgnoreCase)))) return i;
+            }
+            return -1;
+        }
+        if (ids.Length != 2) return -1;
+        return primary[0] == primary[1] ? -1 : (primary[0] ? 1 : 0);
+    }
+
+    public static Screen Find() {
+        var all = Screen.AllScreens;
+        var ids = all.Select(s => N.MonitorId(s.DeviceName)).ToArray();
+        int i = Pick(ids, all.Select(s => s.Primary).ToArray(), Wanted);
+        var desc = i < 0 ? "not found among " + string.Join(" | ", ids) : all[i].DeviceName + " " + ids[i] + " " + all[i].Bounds;
+        if (desc != lastLogged) { lastLogged = desc; Cfg.Log("TV display: " + desc); }
+        return i < 0 ? null : all[i];
+    }
+
+    // `TvShell.exe pick-tv <wanted,codes|-> <id>[*] ...` (a trailing * marks the primary):
+    // exits with Pick's index, or 255 for none. Lets the tests exercise Pick without displays.
+    public static int Cli(string[] args) {
+        if (args.Length < 2) return 254;
+        var wanted = args[1] == "-" ? new string[0] : args[1].Split(',');
+        var rest = args.Skip(2).ToArray();
+        int r = Pick(rest.Select(a => a.TrimEnd('*')).ToArray(), rest.Select(a => a.EndsWith("*")).ToArray(), wanted);
+        return r < 0 ? 255 : r;
+    }
+}
+
 static class N {
     public delegate bool EnumProc(IntPtr h, IntPtr l);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
@@ -102,6 +158,21 @@ static class N {
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
     [DllImport("user32.dll")] public static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] d, uint n, uint size);
     [DllImport("user32.dll")] public static extern uint GetRawInputData(IntPtr h, uint cmd, IntPtr data, ref uint size, uint hdr);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool EnumDisplayDevices(string dev, uint i, ref DISPLAY_DEVICE dd, uint flags);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct DISPLAY_DEVICE {
+        public int cb;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceString;
+        public int StateFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceID;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
+    }
+    // The monitor's device interface path on a display output, e.g. \\?\DISPLAY#ABC1234#5&...#{...};
+    // the second segment is the EDID's manufacturer+product code. "" when nothing is attached.
+    public static string MonitorId(string output) {
+        var dd = new DISPLAY_DEVICE(); dd.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
+        return EnumDisplayDevices(output, 0, ref dd, 1 /*EDD_GET_DEVICE_INTERFACE_NAME*/) ? (dd.DeviceID ?? "") : "";
+    }
     [StructLayout(LayoutKind.Sequential)] public struct RAWINPUTDEVICE { public ushort UsagePage, Usage; public uint Flags; public IntPtr Target; }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
@@ -147,6 +218,8 @@ static class Program {
         } catch { }
         Game.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "game.cfg"));
         string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+        if (mode == "pick-tv") return TvDisplay.Cli(args);
+        TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "launch") return Launcher.Run();
         if (mode == "kodi") return KodiLauncher.Run(args.Length > 1 ? args[1].ToLowerInvariant() : "tv");
         if (mode == "youtube") return YouTubeLauncher.Run();
@@ -324,8 +397,9 @@ static class KodiLauncher {
 // Steam tile "YouTube": YouTube's TV interface in a separate Chrome profile, kiosk mode, on the TV.
 static class YouTubeLauncher {
     public static int Run() {
-        var tv = Screen.AllScreens.FirstOrDefault(s => !s.Primary);
-        var b = tv != null ? tv.Bounds : Screen.PrimaryScreen.Bounds;
+        var tv = TvDisplay.Find();
+        if (tv == null) { Cfg.Log("youtube launcher: no TV display, not opening"); return 1; }
+        var b = tv.Bounds;
         var profile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "yt-profile");
         // YouTube only serves its TV ("leanback") interface to TV devices, so identify as one.
         const string ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)";
@@ -551,7 +625,7 @@ class Helper : Form {
         Application.Exit();
     }
 
-    static Screen Tv() { return Screen.AllScreens.FirstOrDefault(s => !s.Primary); }
+    static Screen Tv() { return TvDisplay.Find(); }
     static Screen Desk() { return Screen.PrimaryScreen; }
 
     void SetTarget(string t, bool activate) {

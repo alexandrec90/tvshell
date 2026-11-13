@@ -32,6 +32,13 @@ The install directory also holds runtime state the helper owns: the YouTube Chro
 profile (`yt-profile/`), `steam-gameid.txt`, and its log under
 `%LOCALAPPDATA%/TvShell/`.
 
+**Which display is the TV** comes from `tv.cfg` there: `monitor=<EDID code>`, the
+segment after `DISPLAY#` in the monitor's device path (the log prints every display's
+path when the TV is not found). Without it the TV is the non-primary display only
+when there are exactly two. No match means no TV, and the helper moves nothing. It
+never guesses, because after a bad boot the driver can bring the displays up in a
+different layout.
+
 ## What the helper does, and why each part exists
 
 `helper/TvShell.cs` is one exe in several modes — no argument is the tray helper, an
