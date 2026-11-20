@@ -96,16 +96,30 @@ def build(output: Path) -> None:
 def install(new_exe: Path, install_dir: Path) -> Path:
     """Swap ``new_exe`` in as ``install_dir/TvShell.exe``; returns the installed path."""
     target = install_dir / "TvShell.exe"
-    aside = install_dir / "TvShell.prev.exe"
-    aside.unlink(missing_ok=True)
+    # A running exe cannot be deleted but can be renamed: a launcher still running from an
+    # old exe (a game or Kodi in progress) keeps it under a TvShell.prev*.exe name until a
+    # later deploy finds it free.
+    for old in install_dir.glob("TvShell.prev*.exe"):
+        _remove_if_free(old)
     if target.exists():
+        aside = install_dir / "TvShell.prev.exe"
+        n = 0
+        while aside.exists():
+            n += 1
+            aside = install_dir / f"TvShell.prev-{n}.exe"
         target.rename(aside)
-    new_exe.replace(target)
-    try:
-        aside.unlink(missing_ok=True)
-    except PermissionError:
-        pass  # a launcher is still running from it; the next deploy removes it
+        new_exe.replace(target)
+        _remove_if_free(aside)
+    else:
+        new_exe.replace(target)
     return target
+
+
+def _remove_if_free(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        pass  # still running; a later deploy removes it
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -122,8 +136,14 @@ def main(argv: list[str] | None = None) -> int:
     build(staged)
     for pid in helper_pids(running_tvshell()):
         subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, check=False)  # noqa: S603, S607 - Windows' taskkill on a PID we just listed
-    target = install(staged, args.install_dir)
-    subprocess.Popen([str(target)], cwd=args.install_dir)  # noqa: S603 - the exe we just installed
+    target = args.install_dir / "TvShell.exe"
+    try:
+        install(staged, args.install_dir)
+    finally:
+        # The helper is already stopped: whatever happened, start the exe that is in place,
+        # so a failed swap never leaves the TV without it.
+        if target.exists():
+            subprocess.Popen([str(target)], cwd=args.install_dir)  # noqa: S603 - the installed exe
     print(f"installed and restarted {target}")
     return 0
 
