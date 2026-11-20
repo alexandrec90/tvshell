@@ -51,6 +51,19 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
 - **Steam only sends the controller to the focused window**, so a controller press
   focuses the app on the TV — but only when focus is on the desk display. Pulling focus
   between windows already on the TV fights Steam's own menu (Home button).
+- **The TV and the desk are separate seats.** Windows has one focused window, so each
+  side takes it back when its own input is used: a controller press focuses the TV, a
+  physical key focuses the last desk window (a low-level keyboard hook holds that first
+  key back so it never types on the TV), and the mouse is confined to the desk. Keys
+  Steam Input injects for the controller never count. Nothing automatic (a TV app
+  covered, Big Picture restarted) takes focus while the desk has it. Steam switches the
+  controller's report format as focus moves, so a press is only ever read against the
+  previous report of the same format; across formats, every focus change looked like one.
+- **One TV app at a time.** A TV app started from its tile closes the other one;
+  otherwise the first hides the second and the controller never reaches it.
+- **Steam counts a tile as running while anything it started is alive**, and then its
+  "Resume" does nothing useful. So the game launcher closes the store launcher when the
+  game exits, and Big Picture is not restarted over a TV app still open on the TV.
 - **Steam hides Big Picture while a game runs**; that is not "closed". Reopening it then
   covers the game with a black screen.
 - **Kodi cannot be placed on a monitor reliably**, so it runs windowed and the helper

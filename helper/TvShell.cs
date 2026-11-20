@@ -7,7 +7,8 @@
 //                               store launcher so Steam Input (controller) attaches. On the TV.
 //   TvShell.exe launch-desk  -> desktop shortcut: same, but the game goes to the desk display.
 // The game is optional and named only in game.cfg beside the exe, never in this source.
-// Nothing here touches any program's memory or sends inputs; it only moves windows.
+// Nothing here touches any program's memory or sends inputs; it moves windows and focus, and
+// holds back a physical key pressed while the TV has focus (the keyboard belongs to the desk).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -124,11 +125,98 @@ static class TvDisplay {
     }
 }
 
+// The keyboard belongs to the desk display. A physical key pressed while focus is on the TV
+// sends focus back to the desk, and the key itself is held back so it never reaches Kodi,
+// YouTube or the game. Classify decides that per key, apart from where focus is.
+static class DeskKeys {
+    public const int Ignore = 0;   // not the person at the desk, or global: leave it and focus alone
+    public const int Pass = 1;     // go back to the desk, and let the key through (a modifier)
+    public const int Hold = 2;     // go back to the desk, and drop the key (it would type on the TV)
+
+    public static int Classify(uint vk, uint flags) {
+        // Injected keys come from software, notably Steam Input turning the controller into
+        // keys for the app on the TV. Only a real keyboard means "the person is at the desk".
+        if ((flags & 0x10 /*LLKHF_INJECTED*/) != 0 || (flags & 0x02 /*LLKHF_LOWER_IL_INJECTED*/) != 0) return Ignore;
+        // Browser, volume and media keys act system-wide; holding one back would break the
+        // volume keys while watching TV.
+        if (vk >= 0xA6 && vk <= 0xB7) return Ignore;
+        // Shift, Ctrl, Alt, Win, PrintScreen: dropping one would break the shortcut it starts.
+        if ((vk >= 0x10 && vk <= 0x12) || (vk >= 0xA0 && vk <= 0xA5) || vk == 0x5B || vk == 0x5C || vk == 0x2C) return Pass;
+        return Hold;
+    }
+
+    // `TvShell.exe desk-key <vk> <flags>` (decimal): exits with Classify's answer, 254 on bad
+    // arguments. Lets the tests exercise Classify without a keyboard.
+    public static int Cli(string[] args) {
+        uint vk, flags;
+        if (args.Length != 3 || !uint.TryParse(args[1], out vk) || !uint.TryParse(args[2], out flags)) return 254;
+        return Classify(vk, flags);
+    }
+}
+
+// Whether a Switch Pro controller report is a fresh press. Steam switches the controller between
+// full reports (0x30) and simple ones (0x3F) as focus moves, and the two lay buttons out
+// differently, so a report is only ever compared with the previous one of the same kind: a mode
+// switch is a new baseline, not a press. Without that, every focus change Steam answered with a
+// mode switch read as a press, and focus bounced between the desk and the TV.
+static class Pad {
+    // Report id plus three button bytes, Home and Capture masked off (Home opens Steam's menu), or
+    // null for a report that carries no buttons this reads.
+    public static byte[] Buttons(byte[] rep) {
+        byte[] b = null;
+        if (rep.Length >= 12 && rep[0] == 0x30) b = new[] { rep[0], rep[3], rep[4], rep[5] };      // full: right, shared, left
+        else if (rep.Length >= 4 && rep[0] == 0x3F) b = new[] { rep[0], rep[1], rep[2], rep[3] };  // simple: buttons, buttons, hat
+        if (b != null) b[2] &= unchecked((byte)~0x30);
+        return b;
+    }
+
+    // `prev` is the last report that had buttons (null before the first).
+    public static bool Pressed(byte[] prev, byte[] rep) {
+        var cur = Buttons(rep);
+        if (cur == null) return false;
+        // A deliberate stick push counts (12-bit sticks, centre ~2048), far beyond drift.
+        if (cur[0] == 0x30) {
+            int lx = rep[6] | ((rep[7] & 0xF) << 8), ly = (rep[7] >> 4) | (rep[8] << 4);
+            int rx = rep[9] | ((rep[10] & 0xF) << 8), ry = (rep[10] >> 4) | (rep[11] << 4);
+            if (Math.Abs(lx - 2048) > 900 || Math.Abs(ly - 2048) > 900 || Math.Abs(rx - 2048) > 900 || Math.Abs(ry - 2048) > 900) return true;
+        }
+        var old = prev == null ? null : Buttons(prev);
+        if (old == null || old[0] != cur[0]) return false;
+        if (cur[0] == 0x3F) {
+            // byte 3 is the d-pad as a direction (0-7), 8 when centred: not a bit field.
+            if ((cur[1] & ~old[1]) != 0 || (cur[2] & ~old[2]) != 0) return true;
+            return cur[3] != old[3] && cur[3] != 8;
+        }
+        for (int i = 1; i < 4; i++) if ((cur[i] & ~old[i]) != 0) return true;
+        return false;
+    }
+
+    // `TvShell.exe pad-press <prev hex|-> <report hex>`: exits 1 for a press, 0 for none, 254 on
+    // bad arguments. Lets the tests exercise Pressed without a controller.
+    public static int Cli(string[] args) {
+        if (args.Length != 3) return 254;
+        byte[] prev = null, rep;
+        if (args[1] != "-" && (prev = Hex(args[1])) == null) return 254;
+        if ((rep = Hex(args[2])) == null || rep.Length == 0) return 254;
+        return Pressed(prev, rep) ? 1 : 0;
+    }
+
+    static byte[] Hex(string s) {
+        if (s.Length % 2 != 0) return null;
+        var b = new byte[s.Length / 2];
+        for (int i = 0; i < b.Length; i++)
+            if (!byte.TryParse(s.Substring(i * 2, 2), System.Globalization.NumberStyles.HexNumber, null, out b[i])) return null;
+        return b;
+    }
+}
+
 static class N {
     public delegate bool EnumProc(IntPtr h, IntPtr l);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
@@ -177,14 +265,29 @@ static class N {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 
-    // Give focus to a window even though we are a background process.
-    public static void Focus(IntPtr h) {
+    public delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint thread);
+    [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetShellWindow();
+    [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr h, bool altTab);
+    [StructLayout(LayoutKind.Sequential)] public struct KBDLLHOOKSTRUCT { public uint Vk, Scan, Flags, Time; public IntPtr Extra; }
+
+    // Give focus to a window even though we are a background process. True when it took:
+    // Windows can refuse a background process, and a silent refusal leaves the controller
+    // (or the keyboard) talking to the other screen.
+    public static bool Focus(IntPtr h) {
         var fg = GetForegroundWindow();
-        if (fg == h) return;
+        if (fg == h) return true;
         uint fgThread = GetWindowThreadProcessId(fg, IntPtr.Zero), me = GetCurrentThreadId();
         bool att = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
         BringWindowToTop(h); SetForegroundWindow(h);
         if (att) AttachThreadInput(me, fgThread, false);
+        if (GetForegroundWindow() == h) return true;
+        SwitchToThisWindow(h, true);
+        return GetForegroundWindow() == h;
     }
     public const uint SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20;
 
@@ -219,6 +322,9 @@ static class Program {
         Game.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "game.cfg"));
         string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         if (mode == "pick-tv") return TvDisplay.Cli(args);
+        if (mode == "desk-key") return DeskKeys.Cli(args);
+        if (mode == "close-store-launcher") return Launcher.CloseStoreLauncherCli();
+        if (mode == "pad-press") return Pad.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "launch") return Launcher.Run();
         if (mode == "kodi") return KodiLauncher.Run(args.Length > 1 ? args[1].ToLowerInvariant() : "tv");
@@ -267,14 +373,7 @@ static class Launcher {
         }
         // The store launcher must be (re)started from here, otherwise the game is spawned by an
         // instance Steam is not watching and the controller won't work.
-        if (Game.LauncherProcess.Length > 0) {
-            var running = Process.GetProcessesByName(Game.LauncherProcess);
-            if (running.Length > 0) {
-                Cfg.Log("launch: closing running store launcher (" + running.Length + " procs)");
-                foreach (var p in running) { try { p.Kill(); } catch { } }
-                for (int i = 0; i < 50 && Process.GetProcessesByName(Game.LauncherProcess).Length > 0; i++) Thread.Sleep(200);
-            }
-        }
+        CloseStoreLauncher("closing running store launcher");
         StartLauncher();
 
         // Wait for the game to appear (the store launcher may need to log in or update), then
@@ -292,8 +391,30 @@ static class Launcher {
         Cfg.Log("launch: game pid " + game.Id + " started");
         try { game.WaitForExit(); } catch { }
         Cfg.Log("launch: game exited");
+        // Steam counts the tile as running while anything it started is alive, and the store
+        // launcher stays open after the game: left running, the tile is stuck on "Resume".
+        CloseStoreLauncher("closing store launcher so the tile ends");
         return 0;
     }
+
+    // Kills every process named launcher_process in game.cfg and waits up to 10 s for them to
+    // go. True when none is left (or none is configured).
+    static bool CloseStoreLauncher(string why) {
+        if (Game.LauncherProcess.Length == 0) return true;
+        var running = Process.GetProcessesByName(Game.LauncherProcess);
+        if (running.Length == 0) return true;
+        Cfg.Log("launch: " + why + " (" + running.Length + " procs)");
+        foreach (var p in running) { try { p.Kill(); } catch { } }
+        for (int i = 0; i < 50; i++) {
+            if (Process.GetProcessesByName(Game.LauncherProcess).Length == 0) return true;
+            Thread.Sleep(200);
+        }
+        return false;
+    }
+
+    // `TvShell.exe close-store-launcher`: runs CloseStoreLauncher, exits 0 when none is left.
+    // Lets the tests exercise it against a stand-in launcher.
+    public static int CloseStoreLauncherCli() { return CloseStoreLauncher("asked to close store launcher") ? 0 : 1; }
 
     static void StartLauncher() {
         try {
@@ -439,7 +560,7 @@ class Helper : Form {
     bool keepBp = true, lockMouse = true;
     System.Windows.Forms.Timer mouseTimer;
     int reclips = 0; DateTime reclipLogged = DateTime.Now;
-    byte[] padButtons = null; DateTime lastPadFocus = DateTime.MinValue;
+    byte[] padReport = null; DateTime lastPadFocus = DateTime.MinValue;
     string gameScreen = "desk";
     int gamePid = -1;
     DateTime modeFileSeen = DateTime.MinValue;
@@ -462,7 +583,7 @@ class Helper : Form {
             new ToolStripMenuItem("Open log", null, (s, e) => { try { Process.Start("notepad.exe", Cfg.LogFile); } catch { } }),
             new ToolStripSeparator(), new ToolStripMenuItem("Exit", null, (s, e) => Close()) });
         Icon ico = SystemIcons.Application;
-        try { if (Game.Icon.Length > 0) ico = Icon.ExtractAssociatedIcon(Game.Icon); } catch { }
+        try { ico = DrawTrayIcon(); } catch { }
         var tip = Game.Configured ? "TvShell (Ctrl+Alt+T: move the game)" : "TvShell";
         tray = new NotifyIcon { Icon = ico, Text = tip, ContextMenuStrip = menu, Visible = true };
         CreateHandle(); // the form is never shown, so create its window explicitly for the hotkey
@@ -470,10 +591,38 @@ class Helper : Form {
         timer.Tick += (s, e) => { try { Tick(); } catch (Exception ex) { Cfg.Log("tick error: " + ex.Message); } };
         timer.Start();
         mouseTimer = new System.Windows.Forms.Timer { Interval = 100 };
-        mouseTimer.Tick += (s, e) => { try { KeepMouseOnDesk(); } catch { } };
+        mouseTimer.Tick += (s, e) => { try { KeepMouseOnDesk(); RememberDeskWindow(); } catch { } };
         mouseTimer.Start();
+        keyHookProc = OnKey;   // held in a field: a collected delegate would crash the hook
+        keyHook = N.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, keyHookProc, N.GetModuleHandle(null), 0);
+        if (keyHook == IntPtr.Zero) Cfg.Log("keyboard hook unavailable: the keyboard will not return focus to the desk");
         Cfg.Log("helper started");
         EnsurePlutoRealAds();
+    }
+
+    // The tray icon is drawn here, a plain TV set, so the helper ships no image file and never
+    // borrows another program's icon (the game's own icon belongs to the game's tile only).
+    static Icon DrawTrayIcon() {
+        using (var bmp = new Bitmap(32, 32))
+        using (var g = Graphics.FromImage(bmp)) {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+            using (var body = new SolidBrush(Color.FromArgb(235, 235, 235)))
+            using (var screen = new SolidBrush(Color.FromArgb(40, 120, 220)))
+            using (var stand = new Pen(Color.FromArgb(235, 235, 235), 3f)) {
+                g.FillRectangle(body, 2, 5, 28, 19);
+                g.FillRectangle(screen, 5, 8, 22, 13);
+                g.DrawLine(stand, 16, 24, 16, 28);
+                g.DrawLine(stand, 9, 29, 23, 29);
+            }
+            IntPtr h = bmp.GetHicon();
+            // Clone so the icon owns its own copy; the HICON from GetHicon is never freed otherwise.
+            using (var tmp = Icon.FromHandle(h)) {
+                var ico = (Icon)tmp.Clone();
+                N.DestroyIcon(h);
+                return ico;
+            }
+        }
     }
 
     // The SlyGuy Pluto add-on asks for streams without server-side ads, which makes Pluto fill
@@ -529,30 +678,63 @@ class Helper : Form {
         if ((DateTime.Now - reclipLogged).TotalMinutes >= 10) { Cfg.Log("mouse re-confined " + reclips + "x in last period"); reclips = 0; reclipLogged = DateTime.Now; }
     }
 
+    // The TV and the desk are separate seats: the controller drives the TV, the keyboard and
+    // mouse the desk. Windows has one focused window, so each side takes focus back when its
+    // own input is used. The desk window to go back to is remembered here.
+    IntPtr lastDeskWindow = IntPtr.Zero;
+    Rectangle tvBounds = Rectangle.Empty;   // refreshed every second by Tick; empty = no TV
+    IntPtr keyHook = IntPtr.Zero; N.HookProc keyHookProc;
+    DateTime lastKeyReturn = DateTime.MinValue;
+
+    void RememberDeskWindow() {
+        var fg = N.GetForegroundWindow();
+        if (fg != IntPtr.Zero && fg != Handle && FocusIsOnDesk()) lastDeskWindow = fg;
+    }
+
+    bool ForegroundOnTv() {
+        if (tvBounds.IsEmpty) return false;
+        var r = N.Rect(N.GetForegroundWindow());
+        return tvBounds.Contains(new Point(r.X + r.Width / 2, r.Y + r.Height / 2));
+    }
+
+    // Low-level keyboard hook: runs before the key reaches any window, so a key pressed while
+    // the TV has focus can be held back. It must return quickly, so the focus switch is queued.
+    IntPtr OnKey(int code, IntPtr w, IntPtr l) {
+        try {
+            int msg = w.ToInt32();
+            if (code >= 0 && (msg == 0x100 || msg == 0x104) /*WM_KEYDOWN, WM_SYSKEYDOWN*/ && ForegroundOnTv()) {
+                var k = (N.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(l, typeof(N.KBDLLHOOKSTRUCT));
+                int act = DeskKeys.Classify(k.Vk, k.Flags);
+                if (act != DeskKeys.Ignore) {
+                    if ((DateTime.Now - lastKeyReturn).TotalMilliseconds > 300) { lastKeyReturn = DateTime.Now; BeginInvoke((Action)ReturnToDesk); }
+                    if (act == DeskKeys.Hold) return new IntPtr(1);
+                }
+            }
+        } catch { }
+        return N.CallNextHookEx(keyHook, code, w, l);
+    }
+
+    void ReturnToDesk() {
+        var target = lastDeskWindow;
+        if (target == IntPtr.Zero || !N.IsWindow(target) || !N.IsWindowVisible(target)) target = N.GetShellWindow();
+        if (target == IntPtr.Zero) return;
+        Cfg.Log(N.Focus(target) ? "keyboard on desk -> focus back to the desk" : "keyboard on desk -> Windows refused the focus change");
+    }
+
     // Controller press -> focus whatever is on the TV, because Steam only sends the controller
     // to the focused window.
     bool padSeen = false;
     void OnPadReport(byte[] rep) {
         if (!padSeen) { padSeen = true; Cfg.Log("first controller report: id 0x" + rep[0].ToString("X2") + ", " + rep.Length + " bytes"); }
-        byte[] btn = null;
-        if (rep.Length >= 12 && rep[0] == 0x30) btn = new[] { rep[3], rep[4], rep[5] };      // Switch Pro full report
-        else if (rep.Length >= 4 && rep[0] == 0x3F) btn = new[] { rep[1], rep[2], rep[3] };  // Switch Pro simple report
-        if (btn == null) return;
-        btn[1] &= unchecked((byte)~0x30);   // ignore Home (0x10) and Capture (0x20): Home opens Steam's menu
-        bool pressed = false;
-        if (padButtons != null && padButtons.Length == btn.Length)
-            for (int i = 0; i < btn.Length; i++) if ((btn[i] & ~padButtons[i]) != 0) pressed = true;
-        padButtons = btn;
-        // A deliberate stick push also counts (12-bit sticks, centre ~2048). The threshold is far
-        // beyond stick drift so a resting, drifting stick never steals focus.
-        if (!pressed && rep[0] == 0x30) {
-            int lx = rep[6] | ((rep[7] & 0xF) << 8), ly = (rep[7] >> 4) | (rep[8] << 4);
-            int rx = rep[9] | ((rep[10] & 0xF) << 8), ry = (rep[10] >> 4) | (rep[11] << 4);
-            if (Math.Abs(lx - 2048) > 900 || Math.Abs(ly - 2048) > 900 || Math.Abs(rx - 2048) > 900 || Math.Abs(ry - 2048) > 900) pressed = true;
-        }
+        if (Pad.Buttons(rep) == null) return;
+        bool pressed = Pad.Pressed(padReport, rep);
+        padReport = rep;
         if (!pressed || (DateTime.Now - lastPadFocus).TotalSeconds < 1.5) return;
-        if (SteamInFront() || FocusIsOnTv()) return;   // already using something on the TV - leave it alone
+        // Already using something on the TV - leave it alone. A Steam window counts as the TV
+        // unless it sits on the desk (the ordinary Steam client there must not keep the controller).
+        if (FocusIsOnTv() || (SteamInFront() && !FocusIsOnDesk())) return;
         lastPadFocus = DateTime.Now;
+        RememberDeskWindow();
         IntPtr target = IntPtr.Zero;
         var game = GameWindow();
         var kodi = TvAppWindow();
@@ -561,8 +743,9 @@ class Helper : Form {
         else if (game != IntPtr.Zero) return;   // the game is on the desk display: leave focus alone
         else { var bp = BigPictureWindows(); if (bp.Count > 0) target = bp[0]; }
         if (target != IntPtr.Zero && N.GetForegroundWindow() != target) {
-            N.Focus(target);
-            Cfg.Log("controller press -> focused " + (target == game ? "game" : target == kodi ? "TV app" : "Big Picture"));
+            var what = target == game ? "game" : target == kodi ? "TV app" : "Big Picture";
+            if (N.Focus(target)) Cfg.Log("controller press -> focused " + what);
+            else { lastPadFocus = DateTime.MinValue; Cfg.Log("controller press -> Windows refused to focus " + what); }
         }
     }
 
@@ -620,6 +803,7 @@ class Helper : Form {
     }
     protected override void OnFormClosed(FormClosedEventArgs e) {
         N.UnregisterHotKey(Handle, HOTKEY);
+        if (keyHook != IntPtr.Zero) N.UnhookWindowsHookEx(keyHook);
         var all = new N.RECT { L = -32000, T = -32000, R = 32000, B = 32000 }; N.ClipCursor(ref all);
         tray.Visible = false; tray.Dispose(); base.OnFormClosed(e);
         Application.Exit();
@@ -661,14 +845,31 @@ class Helper : Form {
 
     // Apps that live on the TV (Kodi, YouTube): keep them there, focus them when they start, never let
     // Big Picture cover them, and bring Big Picture back when they close.
-    class TvApp { public string Name; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending; }
+    class TvApp { public string Name; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending, CoveredLogged; }
     readonly List<TvApp> tvApps = new List<TvApp> {
         // Kodi runs windowed (its own monitor switching is unreliable): strip the border and make its
         // drawing area exactly cover the TV, so it renders full-screen there.
         new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true },
         new TvApp { Name = "YouTube", Find = YouTubeWindow, Borderless = false },
     };
-    void KeepTvApps(Screen tv) { foreach (var a in tvApps) KeepTvApp(a, tv); }
+    // One TV app at a time, like a TV. A second one started from its tile closes the first:
+    // left open, the first sits behind the second with its tile still "running", and the
+    // controller (which goes to Kodi before YouTube) never reaches the second. Apps already
+    // open when the helper starts are left as they are.
+    bool tvAppsSeen = false;
+    void KeepTvApps(Screen tv) {
+        var started = new List<TvApp>();
+        foreach (var a in tvApps) { bool was = a.Running; KeepTvApp(a, tv); if (!was && a.Running) started.Add(a); }
+        if (tvAppsSeen && started.Count == 1)
+            foreach (var other in tvApps) {
+                if (other == started[0] || !other.Running) continue;
+                var h = other.Find();
+                if (h == IntPtr.Zero) continue;
+                N.PostMessage(h, 0x0010 /*WM_CLOSE*/, IntPtr.Zero, IntPtr.Zero);
+                Cfg.Log(started[0].Name + " started -> closing " + other.Name + ", one TV app at a time");
+            }
+        tvAppsSeen = true;
+    }
     void KeepTvApp(TvApp a, Screen tv) {
         var h = a.Find();
         if (h == IntPtr.Zero) {
@@ -702,11 +903,14 @@ class Helper : Form {
             if (!FocusIsOnDesk()) { N.Focus(h); Cfg.Log("focused newly started " + a.Name); }
         }
         // Nothing (e.g. Big Picture) may sit on top of it on the TV - except Steam's menu while you use it.
+        // Raised without taking focus: this only runs while focus is on the desk, and taking it
+        // would send the desk keyboard to the TV. The next controller press focuses it.
         var centre = new N.POINT { X = tv.Bounds.X + tv.Bounds.Width / 2, Y = tv.Bounds.Y + tv.Bounds.Height / 2 };
         if (N.GetAncestor(N.WindowFromPoint(centre), 2) != h && !SteamInFront() && !FocusIsOnTv()) {
             N.SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, 0x1 | 0x2 | 0x10 /*NOSIZE|NOMOVE|NOACTIVATE, HWND_TOP*/);
-            if (N.GetAncestor(N.WindowFromPoint(centre), 2) != h) N.Focus(h);
-            Cfg.Log(a.Name + " was covered -> brought to front");
+            bool raised = N.GetAncestor(N.WindowFromPoint(centre), 2) == h;
+            if (raised || !a.CoveredLogged) Cfg.Log(a.Name + " was covered -> " + (raised ? "brought to front" : "stays covered until the controller is used"));
+            a.CoveredLogged = !raised;
         }
     }
 
@@ -726,13 +930,19 @@ class Helper : Form {
 
     void Tick() {
         var tv = Tv();
+        tvBounds = tv == null ? Rectangle.Empty : tv.Bounds;
 
         // --- the game ---
         var procs = Game.Running();
         if (procs.Length == 0) {
             // Big Picture often comes back black (and with the wrong controller layout) after a
-            // game closes, so restart it a few seconds after the game exits.
-            if (gamePid != -1) { bpRestartAt = DateTime.Now.AddSeconds(3); Cfg.Log("game closed -> restarting Big Picture"); }
+            // game closes, so restart it a few seconds after the game exits - unless Kodi or
+            // YouTube is open on the TV: Big Picture would come up over it, and its tile's
+            // "Resume" cannot bring it back. That app's own close restarts Big Picture.
+            if (gamePid != -1) {
+                if (TvAppWindow() == IntPtr.Zero) { bpRestartAt = DateTime.Now.AddSeconds(3); Cfg.Log("game closed -> restarting Big Picture"); }
+                else Cfg.Log("game closed -> Big Picture left alone, a TV app is open");
+            }
             gamePid = -1; gameHwnd = IntPtr.Zero;
             if (bpRestartAt != DateTime.MinValue && DateTime.Now >= bpRestartAt) {
                 bpRestartAt = DateTime.MinValue;
@@ -779,7 +989,8 @@ class Helper : Form {
                 if (N.Rect(h) != tv.Bounds) { N.Place(h, tv.Bounds, false); Cfg.Log("moved Big Picture to TV " + tv.Bounds); }
             bool tvAppRunning = TvAppWindow() != IntPtr.Zero || Game.Running().Length > 0;
             if (tvAppRunning) focusBpUntil = DateTime.MinValue;   // never pull Big Picture over a running game/TV
-            if (focusBpUntil > DateTime.Now && N.GetForegroundWindow() != bp[0]) {
+            // Not while the desk has focus: the keyboard there would follow it to the TV.
+            if (focusBpUntil > DateTime.Now && N.GetForegroundWindow() != bp[0] && !FocusIsOnDesk()) {
                 N.Focus(bp[0]); focusBpUntil = DateTime.MinValue; Cfg.Log("focused restarted Big Picture");
             }
         } else if (TvAppWindow() != IntPtr.Zero || Game.Running().Length > 0) {

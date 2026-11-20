@@ -59,6 +59,46 @@ def test_install_swaps_exe_and_removes_old(tmp_path):
     assert not (tmp_path / "TvShell.prev.exe").exists()
 
 
+def locked(monkeypatch, *names: str) -> None:
+    """Make these files undeletable, as a running exe is (it can still be renamed)."""
+    real = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self.name in names and self.exists():
+            raise PermissionError(13, "in use", str(self))
+        real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_install_with_old_exe_still_running(monkeypatch, tmp_path):
+    # regression: a launcher running from the exe set aside by the previous deploy made
+    # the next deploy crash after it had already stopped the helper
+    (tmp_path / "TvShell.prev.exe").write_bytes(b"older, still running")
+    (tmp_path / "TvShell.exe").write_bytes(b"old")
+    staged = tmp_path / "TvShell.new.exe"
+    staged.write_bytes(b"new")
+    locked(monkeypatch, "TvShell.prev.exe")
+    assert deploy.install(staged, tmp_path).read_bytes() == b"new"
+    assert (tmp_path / "TvShell.prev.exe").read_bytes() == b"older, still running"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["TvShell.exe", "TvShell.prev.exe"]
+
+
+def test_install_keeps_a_running_old_exe_aside_and_sweeps_it_later(monkeypatch, tmp_path):
+    (tmp_path / "TvShell.prev.exe").write_bytes(b"older, still running")
+    (tmp_path / "TvShell.exe").write_bytes(b"old, still running")
+    staged = tmp_path / "TvShell.new.exe"
+    staged.write_bytes(b"new")
+    locked(monkeypatch, "TvShell.prev.exe", "TvShell.prev-1.exe")
+    deploy.install(staged, tmp_path)
+    assert (tmp_path / "TvShell.prev-1.exe").read_bytes() == b"old, still running"
+    monkeypatch.undo()  # both launchers have exited
+    staged.write_bytes(b"newer")
+    deploy.install(staged, tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["TvShell.exe"]
+    assert (tmp_path / "TvShell.exe").read_bytes() == b"newer"
+
+
 def test_install_into_empty_dir(tmp_path):
     staged = tmp_path / "TvShell.new.exe"
     staged.write_bytes(b"new")
@@ -105,6 +145,25 @@ def test_main_installs_and_restarts_only_the_helper(monkeypatch, tmp_path):
     assert deploy.main(["--install-dir", str(tmp_path)]) == 0
     assert calls == [["taskkill", "/PID", "11", "/F"], [str(tmp_path / "TvShell.exe")]]
     assert (tmp_path / "TvShell.exe").read_bytes() == b"new"
+
+
+def test_main_restarts_the_old_helper_when_the_swap_fails(monkeypatch, tmp_path):
+    (tmp_path / "TvShell.exe").write_bytes(b"old")
+    calls = []
+    monkeypatch.setattr(deploy, "build", lambda out: out.write_bytes(b"new"))
+    monkeypatch.setattr(
+        deploy, "running_tvshell", lambda: [{"ProcessId": 11, "CommandLine": "TvShell.exe"}]
+    )
+    monkeypatch.setattr(deploy.subprocess, "run", lambda argv, **_k: calls.append(argv))
+    monkeypatch.setattr(deploy.subprocess, "Popen", lambda argv, **_k: calls.append(argv))
+
+    def fail(*_a):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(deploy, "install", fail)
+    with pytest.raises(OSError, match="disk full"):
+        deploy.main(["--install-dir", str(tmp_path)])
+    assert calls == [["taskkill", "/PID", "11", "/F"], [str(tmp_path / "TvShell.exe")]]
 
 
 def test_build_reports_compiler_failure(monkeypatch, tmp_path):
