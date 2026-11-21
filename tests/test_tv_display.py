@@ -14,26 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from tvshell import deploy
-
 TV = r"\\?\DISPLAY#TVX1234#5&1&0&UID4354#{e6f07b5f}"
 DESK = r"\\?\DISPLAY#DSK0001#5&1&0&UID4359#{e6f07b5f}"
 OTHER = r"\\?\DISPLAY#OTH9999#5&1&0&UID4360#{e6f07b5f}"
 NONE = 255
 
 pytestmark = pytest.mark.local
-
-
-@pytest.fixture(scope="module")
-def exe(tmp_path_factory) -> Path:
-    if deploy.find_csc() is None:
-        pytest.fail("the .NET Framework C# compiler is not on this PC")
-    out = tmp_path_factory.mktemp("tvshell")
-    (out / "logs").mkdir()
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(deploy, "REPO", out)  # the build log goes under REPO/logs
-        deploy.build(out / "TvShell.exe")
-    return out / "TvShell.exe"
 
 
 def pick(exe: Path, wanted: str, *displays: str) -> int:

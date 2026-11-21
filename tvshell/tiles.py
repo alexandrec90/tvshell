@@ -15,6 +15,7 @@ from pathlib import Path
 
 INSTALL_DIR = Path.home() / "TvShell"
 GAME_CFG = "game.cfg"
+BACKWHEN_APP_DIR = "backwhentv-app"
 KODI_EXE = Path("C:/Program Files/Kodi/kodi.exe")
 CHROME_EXE = Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe")
 
@@ -26,6 +27,10 @@ TILE_SPECS: tuple[tuple[str, Path, str], ...] = (
     ("CBC Gem", KODI_EXE, "kodi gem"),
     ("YouTube", CHROME_EXE, "youtube"),
 )
+
+# Tiles this project used to install and now removes: BackWhenTV's web player, which
+# stalls on its largest Internet Archive videos; its Windows app replaces it.
+RETIRED_TILES: tuple[str, ...] = ("BackWhenTV",)
 
 
 @dataclass(frozen=True)
@@ -67,12 +72,25 @@ def game_spec(install_dir: Path) -> tuple[str, Path, str] | None:
     return cfg["name"], Path(cfg.get("icon") or install_dir / "TvShell.exe"), "launch"
 
 
+def backwhen_app_spec(install_dir: Path) -> tuple[str, Path, str] | None:
+    """The BackWhenTV app tile, or None until its portable exe is in ``BACKWHEN_APP_DIR``.
+
+    The helper starts the newest ``BackWhenTV-Portable-*.exe`` there; the tile takes its icon.
+    """
+    found = sorted(
+        (install_dir / BACKWHEN_APP_DIR).glob("BackWhenTV-Portable-*.exe"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    return ("BackWhenTV App", found[-1], "backwhen-app") if found else None
+
+
 def tiles(install_dir: Path = INSTALL_DIR) -> list[Tile]:
     """Every tile, launching the helper installed in ``install_dir``."""
     exe = '"' + windows_path(install_dir / "TvShell.exe") + '"'
     start_dir = '"' + windows_path(install_dir) + '\\"'
     game = game_spec(install_dir)
-    specs = ((game,) if game else ()) + TILE_SPECS
+    app = backwhen_app_spec(install_dir)
+    specs = ((game,) if game else ()) + TILE_SPECS + ((app,) if app else ())
     return [
         Tile(name, exe, start_dir, windows_path(icon), options) for name, icon, options in specs
     ]

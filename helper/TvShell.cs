@@ -3,12 +3,14 @@
 //   TvShell.exe              -> background helper (tray icon, hotkey Ctrl+Alt+T)
 //   TvShell.exe kodi <what>  -> Steam tile: Kodi on the TV (tv, radio, cbcradio, gem)
 //   TvShell.exe youtube      -> Steam tile: YouTube's TV interface on the TV
+//   TvShell.exe backwhen-app -> Steam tile: BackWhenTV's Windows app (backwhentv-app\) on the TV
 //   TvShell.exe launch       -> Steam tile: the game from game.cfg, started through its
 //                               store launcher so Steam Input (controller) attaches. On the TV.
 //   TvShell.exe launch-desk  -> desktop shortcut: same, but the game goes to the desk display.
 // The game is optional and named only in game.cfg beside the exe, never in this source.
-// Nothing here touches any program's memory or sends inputs; it moves windows and focus, and
-// holds back a physical key pressed while the TV has focus (the keyboard belongs to the desk).
+// Nothing here touches any program's memory. It moves windows and focus, holds back a physical
+// key pressed while the TV has focus (the keyboard belongs to the desk), and sends keys only to a
+// keyboard-only app on the TV (BackWhenTV's) while that app has focus (PadKeys).
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -25,7 +27,6 @@ static class Cfg {
     public static readonly string ModeFile = Path.Combine(Dir, "game-screen.txt");  // "tv"/"desk", written at launch
     public static readonly string NextFile = Path.Combine(Dir, "next-screen.txt");  // handoff from launch-desk to launch
     public static readonly string LogFile = Path.Combine(Dir, "tvshell.log");
-    public static readonly string YouTubePidFile = Path.Combine(Dir, "youtube.pid");
     public const string KodiExe = @"C:\Program Files\Kodi\kodi.exe";
     public const string ChromeExe = @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe";
     public static string SteamGameId = "";  // filled from steam-gameid.txt next to the exe
@@ -122,6 +123,74 @@ static class TvDisplay {
         var rest = args.Skip(2).ToArray();
         int r = Pick(rest.Select(a => a.TrimEnd('*')).ToArray(), rest.Select(a => a.EndsWith("*")).ToArray(), wanted);
         return r < 0 ? 255 : r;
+    }
+}
+
+// The controller's buttons as keys, for the BackWhenTV app, which only understands a
+// keyboard. The helper already reads the controller, so it presses the keys itself, and only
+// while that app's window has focus; the app's Steam tile keeps Steam's default layout, which
+// sends no keys, so no press lands twice.
+static class PadKeys {
+    public const int Up = 1, Down = 2, Left = 4, Right = 8, A = 16, B = 32, Minus = 64;
+
+    // The logical buttons held in a Switch Pro report, or -1 for a report it does not know.
+    // Labels are Nintendo's: A is the right face button, B the bottom one.
+    public static int Buttons(byte[] rep) {
+        int b = 0;
+        if (rep.Length >= 6 && rep[0] == 0x30) {   // full report: right, shared, left button bytes
+            if ((rep[3] & 0x08) != 0) b |= A;
+            if ((rep[3] & 0x04) != 0) b |= B;
+            if ((rep[4] & 0x01) != 0) b |= Minus;
+            if ((rep[5] & 0x02) != 0) b |= Up;
+            if ((rep[5] & 0x01) != 0) b |= Down;
+            if ((rep[5] & 0x08) != 0) b |= Left;
+            if ((rep[5] & 0x04) != 0) b |= Right;
+            return b;
+        }
+        if (rep.Length >= 4 && rep[0] == 0x3F) {   // simple report: face buttons, shared, hat 0-7 (8 = centred)
+            if ((rep[1] & 0x02) != 0) b |= A;
+            if ((rep[1] & 0x01) != 0) b |= B;
+            if ((rep[2] & 0x01) != 0) b |= Minus;
+            int hat = rep[3];
+            if (hat == 7 || hat == 0 || hat == 1) b |= Up;
+            if (hat == 1 || hat == 2 || hat == 3) b |= Right;
+            if (hat == 3 || hat == 4 || hat == 5) b |= Down;
+            if (hat == 5 || hat == 6 || hat == 7) b |= Left;
+            return b;
+        }
+        return -1;
+    }
+
+    // The key presses for newly pressed buttons, each a virtual-key list pressed together:
+    // the D-pad is the arrows, A is Enter, B is Esc, and Minus closes the app (Alt+F4).
+    public static List<byte[]> Keys(int pressed) {
+        var keys = new List<byte[]>();
+        if ((pressed & Up) != 0) keys.Add(new byte[] { 0x26 });
+        if ((pressed & Down) != 0) keys.Add(new byte[] { 0x28 });
+        if ((pressed & Left) != 0) keys.Add(new byte[] { 0x25 });
+        if ((pressed & Right) != 0) keys.Add(new byte[] { 0x27 });
+        if ((pressed & A) != 0) keys.Add(new byte[] { 0x0D });
+        if ((pressed & B) != 0) keys.Add(new byte[] { 0x1B });
+        if ((pressed & Minus) != 0) keys.Add(new byte[] { 0x12, 0x73 });
+        return keys;
+    }
+
+    public static void Press(byte[] combo) {
+        foreach (var vk in combo) N.keybd_event(vk, 0, 0, UIntPtr.Zero);
+        for (int i = combo.Length - 1; i >= 0; i--) N.keybd_event(combo[i], 0, 2 /*KEYEVENTF_KEYUP*/, UIntPtr.Zero);
+    }
+
+    // `TvShell.exe pad-keys <hex report>`: prints Buttons and the keys for them (as if all were
+    // newly pressed), and exits 0, or 2 for a report it does not know. Lets the tests run without a pad.
+    public static int Cli(string[] args) {
+        if (args.Length < 2) return 254;
+        var hex = args[1];
+        var rep = new byte[hex.Length / 2];
+        for (int i = 0; i < rep.Length; i++) rep[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+        int b = Buttons(rep);
+        if (b < 0) { Console.WriteLine("unknown"); return 2; }
+        Console.WriteLine(b + " " + string.Join(" ", Keys(b).Select(c => string.Join("+", c.Select(v => v.ToString("X2"))))));
+        return 0;
     }
 }
 
@@ -244,6 +313,7 @@ static class N {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] public static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] d, uint n, uint size);
     [DllImport("user32.dll")] public static extern uint GetRawInputData(IntPtr h, uint cmd, IntPtr data, ref uint size, uint hdr);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool EnumDisplayDevices(string dev, uint i, ref DISPLAY_DEVICE dd, uint flags);
@@ -322,13 +392,16 @@ static class Program {
         Game.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "game.cfg"));
         string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         if (mode == "pick-tv") return TvDisplay.Cli(args);
+        if (mode == "pad-keys") return PadKeys.Cli(args);
         if (mode == "desk-key") return DeskKeys.Cli(args);
         if (mode == "close-store-launcher") return Launcher.CloseStoreLauncherCli();
         if (mode == "pad-press") return Pad.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "launch") return Launcher.Run();
         if (mode == "kodi") return KodiLauncher.Run(args.Length > 1 ? args[1].ToLowerInvariant() : "tv");
-        if (mode == "youtube") return YouTubeLauncher.Run();
+        if (mode == "backwhen-app") return BackWhenApp.Run();
+        var webApp = WebApp.ForMode(mode);
+        if (webApp != null) return WebAppLauncher.Run(webApp);
         if (mode == "launch-desk") return Launcher.ViaSteam("desk");
         if (mode == "launch-tv") return Launcher.ViaSteam("tv");
         bool created;
@@ -515,29 +588,91 @@ static class KodiLauncher {
     }
 }
 
-// Steam tile "YouTube": YouTube's TV interface in a separate Chrome profile, kiosk mode, on the TV.
-static class YouTubeLauncher {
+// A web app that runs in its own Chrome (separate profile, kiosk mode) on the TV.
+class WebApp {
+    public string Mode, Name, ProfileDir, Url, UserAgent;
+    public string PidFile { get { return Path.Combine(Cfg.Dir, Mode + ".pid"); } }
+    public string Profile { get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ProfileDir); } }
+
+    public static readonly WebApp[] All = {
+        // Steam tile "YouTube". YouTube only serves its TV ("leanback") interface to TV devices,
+        // so identify as one.
+        new WebApp { Mode = "youtube", Name = "YouTube", ProfileDir = "yt-profile", Url = "https://www.youtube.com/tv",
+            UserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)" },
+    };
+    public static WebApp ForMode(string mode) { return All.FirstOrDefault(a => a.Mode == mode); }
+
+    // The app's browser window, from the PID its launcher records.
+    public IntPtr Window() {
+        try {
+            if (!File.Exists(PidFile)) return IntPtr.Zero;
+            uint pid = uint.Parse(File.ReadAllText(PidFile).Trim());
+            var w = N.WindowsOf(p => p == pid, t => t.Length > 0);
+            return w.Count > 0 ? w[0] : IntPtr.Zero;
+        } catch { return IntPtr.Zero; }
+    }
+}
+
+// Steam tile "BackWhenTV App": BackWhenTV's own Windows app, the portable exe the user put in
+// backwhentv-app\ beside this one. It opens full-screen on the primary display; the helper moves it.
+// The portable exe stays running as the parent of the app, so Steam's controller support follows it.
+static class BackWhenApp {
+    public const string ProcessName = "BackWhenTV";
+    static string Folder { get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "backwhentv-app"); } }
+
+    // The newest BackWhenTV-Portable-<version>.exe there, or null.
+    public static string Exe() {
+        if (!Directory.Exists(Folder)) return null;
+        return Directory.GetFiles(Folder, "BackWhenTV-Portable-*.exe").OrderByDescending(f => File.GetLastWriteTimeUtc(f)).FirstOrDefault();
+    }
+
     public static int Run() {
+        var exe = Exe();
+        if (exe == null) { Cfg.Log("backwhen-app launcher: no BackWhenTV-Portable-*.exe in " + Folder); return 1; }
+        if (Process.GetProcessesByName(ProcessName).Length > 0) { Cfg.Log("backwhen-app launcher: already running"); return 0; }
+        var p = Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Folder });
+        Cfg.Log("backwhen-app launcher: started " + Path.GetFileName(exe));
+        try { p.WaitForExit(); } catch { }
+        Cfg.Log("backwhen-app launcher: closed");
+        return 0;
+    }
+
+    static HashSet<uint> Pids() { return new HashSet<uint>(Process.GetProcessesByName(ProcessName).Select(p => (uint)p.Id)); }
+    public static IntPtr Window() {
+        var pids = Pids();
+        if (pids.Count == 0) return IntPtr.Zero;
+        var w = N.WindowsOf(pids.Contains, t => t.Length > 0);
+        return w.Count > 0 ? w[0] : IntPtr.Zero;
+    }
+    public static bool HasFocus() {
+        uint fg; N.GetWindowThreadProcessId(N.GetForegroundWindow(), out fg);
+        return fg != 0 && Pids().Contains(fg);
+    }
+}
+
+// Steam tiles for the web apps: Chrome as our child (so Steam's controller support follows it).
+static class WebAppLauncher {
+    public static int Run(WebApp app) {
+        string tag = app.Mode + " launcher: ";
         var tv = TvDisplay.Find();
-        if (tv == null) { Cfg.Log("youtube launcher: no TV display, not opening"); return 1; }
+        if (tv == null) { Cfg.Log(tag + "no TV display, not opening"); return 1; }
         var b = tv.Bounds;
-        var profile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "yt-profile");
-        // YouTube only serves its TV ("leanback") interface to TV devices, so identify as one.
-        const string ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)";
-        var args = string.Format("--user-data-dir=\"{0}\" --kiosk --window-position={1},{2} --window-size={3},{4} --user-agent=\"{5}\" " +
-            "--no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required --disable-features=Translate https://www.youtube.com/tv",
-            profile, b.X, b.Y, b.Width, b.Height, ua);
+        var profile = app.Profile;
+        var ua = string.IsNullOrEmpty(app.UserAgent) ? "" : "--user-agent=\"" + app.UserAgent + "\" ";
+        var args = string.Format("--user-data-dir=\"{0}\" --kiosk --window-position={1},{2} --window-size={3},{4} {5}" +
+            "--no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required --disable-features=Translate {6}",
+            profile, b.X, b.Y, b.Width, b.Height, ua, app.Url);
         Process.Start(new ProcessStartInfo(Cfg.ChromeExe, args) { UseShellExecute = false });
         // chrome.exe hands off to a new browser process and exits; find the real browser process
         // (the one using our profile without a --type= switch) and wait on that.
         Process browser = null;
         for (int i = 0; i < 40 && browser == null; i++) { Thread.Sleep(500); browser = FindBrowser(profile); }
-        if (browser == null) { Cfg.Log("youtube launcher: browser process not found"); return 1; }
-        Directory.CreateDirectory(Cfg.Dir); File.WriteAllText(Cfg.YouTubePidFile, browser.Id.ToString());
-        Cfg.Log("youtube launcher: chrome browser pid " + browser.Id);
+        if (browser == null) { Cfg.Log(tag + "browser process not found"); return 1; }
+        Directory.CreateDirectory(Cfg.Dir); File.WriteAllText(app.PidFile, browser.Id.ToString());
+        Cfg.Log(tag + "chrome browser pid " + browser.Id);
         try { browser.WaitForExit(); } catch { }
-        try { File.Delete(Cfg.YouTubePidFile); } catch { }
-        Cfg.Log("youtube launcher: closed");
+        try { File.Delete(app.PidFile); } catch { }
+        Cfg.Log(tag + "closed");
         return 0;
     }
     static Process FindBrowser(string profile) {
@@ -726,9 +861,11 @@ class Helper : Form {
     bool padSeen = false;
     void OnPadReport(byte[] rep) {
         if (!padSeen) { padSeen = true; Cfg.Log("first controller report: id 0x" + rep[0].ToString("X2") + ", " + rep.Length + " bytes"); }
+        bool asKeys = PadToKeys(rep);
         if (Pad.Buttons(rep) == null) return;
         bool pressed = Pad.Pressed(padReport, rep);
-        padReport = rep;
+        padReport = rep;   // kept current while the presses are keys, so no stale report reads as a press later
+        if (asKeys) return;
         if (!pressed || (DateTime.Now - lastPadFocus).TotalSeconds < 1.5) return;
         // Already using something on the TV - leave it alone. A Steam window counts as the TV
         // unless it sits on the desk (the ordinary Steam client there must not keep the controller).
@@ -747,6 +884,20 @@ class Helper : Form {
             if (N.Focus(target)) Cfg.Log("controller press -> focused " + what);
             else { lastPadFocus = DateTime.MinValue; Cfg.Log("controller press -> Windows refused to focus " + what); }
         }
+    }
+
+    // While the keyboard-only BackWhenTV app has focus, newly pressed buttons become its keys.
+    // True when the report was used that way.
+    int padHeld = 0; bool padKeysLogged = false;
+    bool PadToKeys(byte[] rep) {
+        int now = PadKeys.Buttons(rep);
+        if (now < 0) return false;
+        int pressed = now & ~padHeld; padHeld = now;
+        if (pressed == 0) return false;   // checking focus lists processes: only on a press
+        if (!BackWhenApp.HasFocus()) return false;
+        foreach (var combo in PadKeys.Keys(pressed)) PadKeys.Press(combo);
+        if (!padKeysLogged) { padKeysLogged = true; Cfg.Log("controller -> keys for the BackWhenTV app"); }
+        return true;
     }
 
     // True when a Steam window (Big Picture, its in-game menu) is the focused window.
@@ -827,35 +978,33 @@ class Helper : Form {
         return w.Count > 0 ? w[0] : IntPtr.Zero;
     }
 
-    // YouTube runs in its own Chrome (separate profile, kiosk); the launcher records its PID.
-    static IntPtr YouTubeWindow() {
-        try {
-            if (!File.Exists(Cfg.YouTubePidFile)) return IntPtr.Zero;
-            uint pid = uint.Parse(File.ReadAllText(Cfg.YouTubePidFile).Trim());
-            var w = N.WindowsOf(p => p == pid, t => t.Length > 0);
-            return w.Count > 0 ? w[0] : IntPtr.Zero;
-        } catch { return IntPtr.Zero; }
+    // Kodi, else the BackWhenTV app, else the first web app (YouTube) that has a window.
+    static IntPtr TvAppWindow() {
+        var k = KodiWindow(); if (k != IntPtr.Zero) return k;
+        var bw = BackWhenApp.Window(); if (bw != IntPtr.Zero) return bw;
+        foreach (var a in WebApp.All) { var w = a.Window(); if (w != IntPtr.Zero) return w; }
+        return IntPtr.Zero;
     }
-    static IntPtr TvAppWindow() { var k = KodiWindow(); return k != IntPtr.Zero ? k : YouTubeWindow(); }
 
     static bool FocusIsOnDesk() {
         var r = N.Rect(N.GetForegroundWindow());
         return Desk().Bounds.Contains(new Point(r.X + r.Width / 2, r.Y + r.Height / 2));
     }
 
-    // Apps that live on the TV (Kodi, YouTube): keep them there, focus them when they start, never let
-    // Big Picture cover them, and bring Big Picture back when they close.
+    // Apps that live on the TV (Kodi, BackWhenTV's app, the web apps): keep them there, focus them when
+    // they start, never let Big Picture cover them, and bring Big Picture back when they close.
     class TvApp { public string Name; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending, CoveredLogged; }
     readonly List<TvApp> tvApps = new List<TvApp> {
         // Kodi runs windowed (its own monitor switching is unreliable): strip the border and make its
         // drawing area exactly cover the TV, so it renders full-screen there.
         new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true },
-        new TvApp { Name = "YouTube", Find = YouTubeWindow, Borderless = false },
-    };
+        // BackWhenTV's app opens borderless full-screen on the primary display: same treatment.
+        new TvApp { Name = "BackWhenTV app", Find = BackWhenApp.Window, Borderless = true },
+    }.Concat(WebApp.All.Select(a => new TvApp { Name = a.Name, Find = a.Window, Borderless = false })).ToList();
     // One TV app at a time, like a TV. A second one started from its tile closes the first:
     // left open, the first sits behind the second with its tile still "running", and the
-    // controller (which goes to Kodi before YouTube) never reaches the second. Apps already
-    // open when the helper starts are left as they are.
+    // controller (which goes to the first TV app it finds) never reaches the second. Apps
+    // already open when the helper starts are left as they are.
     bool tvAppsSeen = false;
     void KeepTvApps(Screen tv) {
         var started = new List<TvApp>();
