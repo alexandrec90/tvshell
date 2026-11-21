@@ -151,8 +151,14 @@ def main(argv: list[str] | None = None) -> int:
     build(staged)
     for pid in helper_pids(running_tvshell()):
         subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, check=False)  # noqa: S603, S607 - Windows' taskkill on a PID we just listed
-    target = install(staged, args.install_dir)
-    subprocess.Popen([str(target)], cwd=args.install_dir)  # noqa: S603 - the exe we just installed
+    target = args.install_dir / "TvShell.exe"
+    try:
+        install(staged, args.install_dir)
+    finally:
+        # The helper is already stopped: whatever happened, start the exe that is in place,
+        # so a failed swap never leaves the TV without it.
+        if target.exists():
+            subprocess.Popen([str(target)], cwd=args.install_dir)  # noqa: S603 - the installed exe
     print(f"installed and restarted {target}")
     return 0
 
