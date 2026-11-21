@@ -85,9 +85,12 @@ def build(output: Path) -> None:
     csc = find_csc()
     if csc is None:
         raise SystemExit("C# compiler not found (.NET Framework 4 csc.exe)")
+    log = REPO / "logs" / "build-helper.log"
+    # logs/ is ignored, so a fresh checkout or worktree has none.
+    log.parent.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
     cmd = csc_command(csc, SOURCE, output)
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603 - local compiler
-    log = REPO / "logs" / "build-helper.log"
     log.write_text(result.stdout + result.stderr, encoding="utf-8")
     if result.returncode != 0:
         raise SystemExit(f"build failed; compiler output in {log}")
