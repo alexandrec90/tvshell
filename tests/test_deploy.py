@@ -14,6 +14,7 @@ from tvshell import deploy
         ('"C:\\Users\\u\\TvShell\\TvShell.exe" launch', True),
         ('"C:\\Users\\u\\TvShell\\TvShell.exe" kodi tv', True),
         ('"C:\\Users\\u\\TvShell\\TvShell.exe"  youtube', True),
+        ('"C:\\Users\\u\\TvShell\\TvShell.exe" backwhen-app', True),
         ('"C:\\Users\\u\\TvShell\\TvShell.exe" --unknown', False),
         ("something.exe launch", False),
     ],
@@ -57,6 +58,65 @@ def test_install_swaps_exe_and_removes_old(tmp_path):
     assert target.read_bytes() == b"new"
     assert not staged.exists()
     assert not (tmp_path / "TvShell.prev.exe").exists()
+
+
+def _lock(monkeypatch, *locked: Path) -> None:
+    """Make ``locked`` undeletable, as Windows does for an exe a process still runs from."""
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self in locked:
+            raise PermissionError(13, "Access is denied", str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_install_survives_a_launcher_still_running_from_the_previous_aside(monkeypatch, tmp_path):
+    # Regression: deploy twice while a launcher from the first build is still open (a show
+    # in progress). That build is now TvShell.prev.exe, which cannot be deleted, and the
+    # second deploy used to die on it, leaving no helper installed and running.
+    (tmp_path / "TvShell.exe").write_bytes(b"current")
+    held = tmp_path / "TvShell.prev.exe"
+    held.write_bytes(b"older, still running")
+    _lock(monkeypatch, held)
+    staged = tmp_path / "TvShell.new.exe"
+    staged.write_bytes(b"new")
+
+    target = deploy.install(staged, tmp_path)
+
+    assert target.read_bytes() == b"new"
+    assert held.read_bytes() == b"older, still running"
+    assert not staged.exists()
+
+
+def test_install_clears_old_asides_once_nothing_runs_from_them(tmp_path):
+    (tmp_path / "TvShell.exe").write_bytes(b"current")
+    (tmp_path / "TvShell.prev.exe").write_bytes(b"older")
+    (tmp_path / "TvShell.prev-1.exe").write_bytes(b"older still")
+    staged = tmp_path / "TvShell.new.exe"
+    staged.write_bytes(b"new")
+    deploy.install(staged, tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["TvShell.exe"]
+
+
+def test_free_aside_skips_names_in_use(tmp_path):
+    assert deploy.free_aside(tmp_path) == tmp_path / "TvShell.prev.exe"
+    (tmp_path / "TvShell.prev.exe").write_bytes(b"")
+    (tmp_path / "TvShell.prev-1.exe").write_bytes(b"")
+    assert deploy.free_aside(tmp_path) == tmp_path / "TvShell.prev-2.exe"
+
+
+def test_remove_asides_keeps_the_held_one_and_the_installed_exe(monkeypatch, tmp_path):
+    for name in ("TvShell.exe", "TvShell.prev.exe", "TvShell.prev-1.exe", "TvShell.new.exe"):
+        (tmp_path / name).write_bytes(b"")
+    _lock(monkeypatch, tmp_path / "TvShell.prev-1.exe")
+    deploy.remove_asides(tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "TvShell.exe",
+        "TvShell.new.exe",
+        "TvShell.prev-1.exe",
+    ]
 
 
 def test_install_into_empty_dir(tmp_path):

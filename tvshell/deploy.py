@@ -24,7 +24,14 @@ from tvshell.tiles import INSTALL_DIR
 REPO = Path(__file__).resolve().parent.parent
 SOURCE = REPO / "helper" / "TvShell.cs"
 REFERENCES = ("System.Windows.Forms.dll", "System.Drawing.dll", "System.Management.dll")
-LAUNCHER_ARGS = ("launch", "launch-desk", "launch-tv", "kodi", "youtube")
+LAUNCHER_ARGS = (
+    "launch",
+    "launch-desk",
+    "launch-tv",
+    "kodi",
+    "youtube",
+    "backwhen-app",
+)
 
 
 def find_csc(windir: str | None = None) -> Path | None:
@@ -93,18 +100,40 @@ def build(output: Path) -> None:
         raise SystemExit(f"build failed; compiler output in {log}")
 
 
+def remove_asides(install_dir: Path) -> None:
+    """Delete every set-aside ``TvShell.prev*.exe`` that nothing runs from any more.
+
+    A launcher started from an older build (a show in progress) keeps its exe undeletable,
+    possibly across several deploys; that one stays until a later deploy finds it free.
+    """
+    for aside in install_dir.glob("TvShell.prev*.exe"):
+        try:
+            aside.unlink()
+        except PermissionError:
+            pass
+
+
+def free_aside(install_dir: Path) -> Path:
+    """The first of ``TvShell.prev.exe``, ``TvShell.prev-1.exe``, ... that does not exist."""
+    aside, n = install_dir / "TvShell.prev.exe", 0
+    while aside.exists():
+        n += 1
+        aside = install_dir / f"TvShell.prev-{n}.exe"
+    return aside
+
+
 def install(new_exe: Path, install_dir: Path) -> Path:
-    """Swap ``new_exe`` in as ``install_dir/TvShell.exe``; returns the installed path."""
+    """Swap ``new_exe`` in as ``install_dir/TvShell.exe``; returns the installed path.
+
+    A running exe cannot be deleted but can be renamed, so the current one is set aside
+    under a free name rather than overwritten.
+    """
     target = install_dir / "TvShell.exe"
-    aside = install_dir / "TvShell.prev.exe"
-    aside.unlink(missing_ok=True)
+    remove_asides(install_dir)
     if target.exists():
-        target.rename(aside)
+        target.rename(free_aside(install_dir))
     new_exe.replace(target)
-    try:
-        aside.unlink(missing_ok=True)
-    except PermissionError:
-        pass  # a launcher is still running from it; the next deploy removes it
+    remove_asides(install_dir)
     return target
 
 

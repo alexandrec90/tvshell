@@ -17,7 +17,7 @@ import sys
 import zlib
 from pathlib import Path
 
-from tvshell.tiles import Tile, tiles
+from tvshell.tiles import RETIRED_TILES, Tile, tiles
 
 MAP, STRING, INT32, END = 0, 1, 2, 8
 
@@ -111,11 +111,35 @@ def upsert(shortcuts: dict, tile: Tile) -> tuple[dict, bool]:
     return entry, True
 
 
-def apply(data: bytes, wanted: list[Tile]) -> tuple[bytes, list[str]]:
-    """Return ``data`` with every tile in ``wanted`` present, plus one report line per tile."""
+def retire(shortcuts: dict, names: tuple[str, ...], helper_exe: str) -> tuple[dict, list[str]]:
+    """``shortcuts`` without the entries named in ``names`` that launch ``helper_exe``.
+
+    Steam keys its entries "0", "1", ... in order, so the rest are renumbered. A shortcut the
+    user made with the same name but another target is left alone. Returns the new mapping
+    and the names removed.
+    """
+    kept, removed = [], []
+    for key in sorted(shortcuts, key=int):
+        entry = shortcuts[key]
+        if entry.get("AppName") in names and entry.get("Exe") == helper_exe:
+            removed.append(entry["AppName"])
+        else:
+            kept.append(entry)
+    return {str(i): entry for i, entry in enumerate(kept)}, removed
+
+
+def apply(
+    data: bytes, wanted: list[Tile], retired: tuple[str, ...] = RETIRED_TILES
+) -> tuple[bytes, list[str]]:
+    """Return ``data`` with every tile in ``wanted`` present and every ``retired`` one gone,
+    plus one report line per tile."""
     top, end = parse(data)
     shortcuts = top.setdefault("shortcuts", {})
     report = []
+    if wanted:
+        shortcuts, gone = retire(shortcuts, retired, wanted[0].exe)
+        top["shortcuts"] = shortcuts
+        report += [f"removed {name}" for name in gone]
     for tile in wanted:
         entry, added = upsert(shortcuts, tile)
         verb = "added" if added else "updated"
