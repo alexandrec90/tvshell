@@ -11,7 +11,10 @@ What counts as a problem:
 - **crash**: a TV program (`WATCHED_APPS`) in the Windows Application log's crash events,
   or a Kodi crash dump. Each one carries the lines Kodi logged just before it, from
   `kodi.log`, `kodi.old.log` and the copies the helper keeps in `crashes/` (Kodi
-  overwrites its log on the next start).
+  overwrites its log on the next start). A Kodi crash after Kodi's own last line
+  (`KODI_EXITED`) is a note in the artifact, not a crash: Kodi 21.3 corrupts its heap in
+  its final teardown on most exits on this PC (0xc0000374 in ntdll), after it has saved
+  everything. The defect is Kodi's, and no change here can fix it.
 - **error**: an `ERROR` line in the helper's log. The helper logs ERROR only for a defect
   someone has to fix (`Cfg.Error` in `helper/TvShell.cs`).
 - **focus**: Windows refusing most of the helper's focus changes. A refused focus is a
@@ -63,6 +66,11 @@ ERROR = "error"
 FOCUS = "focus"
 HELPER_DOWN = "helper-down"
 KINDS = (CRASH, ERROR, FOCUS, HELPER_DOWN)
+# A note, not a kind: recorded in the artifact, never a red test.
+CRASH_ON_EXIT = "crash-on-exit"
+# Kodi's last log line, after it has saved its settings and the EPG and unloaded everything.
+# Must match `Cfg.KodiExitedLine` in helper/TvShell.cs.
+KODI_EXITED = "Exiting the application..."
 
 STAMP = "%Y-%m-%d %H:%M:%S"
 LINE = re.compile(
@@ -218,18 +226,33 @@ def kodi_logs(kodi_dir: Path, log_dir: Path) -> list[Path]:
     ]
 
 
-def crash_findings(crashes: Sequence[Crash], logs: Sequence[Path]) -> list[Finding]:
-    found = []
+def after_shutdown(context: Sequence[str]) -> bool:
+    """Whether the last thing Kodi logged before a crash was its own final line. Pure."""
+    lines = [line for line in context if KODI_LINE.match(line)]
+    return bool(lines) and lines[-1].rstrip().endswith(KODI_EXITED)
+
+
+def crash_findings(
+    crashes: Sequence[Crash], logs: Sequence[Path]
+) -> tuple[list[Finding], list[Finding]]:
+    """The crashes as findings, and as notes those Kodi had after it finished shutting down."""
+    found, notes = [], []
     for c in crashes:
         detail = ", ".join(
             x for x in (c.code and f"exception {c.code}", c.module and f"in {c.module}") if x
         )
+        evidence = kodi_context(c.when, logs) if c.app.lower() == "kodi.exe" else []
+        when = c.when.strftime(STAMP)
+        if after_shutdown(evidence):
+            summary = f"{c.app} crashed after it finished shutting down"
+            summary += (f" ({detail})" if detail else "") + f", seen in the {c.seen_in}"
+            notes.append(Finding(CRASH_ON_EXIT, when, summary, evidence))
+            continue
         summary = (
             f"{c.app} crashed" + (f" ({detail})" if detail else "") + f", seen in the {c.seen_in}"
         )
-        evidence = kodi_context(c.when, logs) if c.app.lower() == "kodi.exe" else []
-        found.append(Finding(CRASH, c.when.strftime(STAMP), summary, evidence))
-    return found
+        found.append(Finding(CRASH, when, summary, evidence))
+    return found, notes
 
 
 def error_findings(entries: Sequence[Entry]) -> list[Finding]:
@@ -288,6 +311,7 @@ class Report:
     since: str
     checked: str
     findings: list[Finding]
+    notes: list[Finding] = field(default_factory=list)
 
     def of(self, kind: str) -> list[Finding]:
         return [f for f in self.findings if f.kind == kind]
@@ -305,7 +329,8 @@ def check(
     since = window_start(now, installed)
     crashes = merge_crashes(events(since), crash_dumps(kodi_dir, since))
     entries = read_entries(log_dir, since)
-    findings = crash_findings(crashes, kodi_logs(kodi_dir, log_dir)) + error_findings(entries)
+    crashed, notes = crash_findings(crashes, kodi_logs(kodi_dir, log_dir))
+    findings = crashed + error_findings(entries)
     focus = focus_finding(entries)
     if focus:
         findings.append(focus)
@@ -313,7 +338,7 @@ def check(
         findings.append(
             Finding(HELPER_DOWN, now.strftime(STAMP), "the TvShell tray helper is not running")
         )
-    return Report(since.strftime(STAMP), now.strftime(STAMP), findings)
+    return Report(since.strftime(STAMP), now.strftime(STAMP), findings, notes)
 
 
 def write_artifact(report: Report, path: Path = ARTIFACT) -> Path:
@@ -323,6 +348,7 @@ def write_artifact(report: Report, path: Path = ARTIFACT) -> Path:
         "checked": report.checked,
         "logs": {"helper": str(LOG_DIR / "tvshell.log"), "kodi": str(KODI_DIR / "kodi.log")},
         "findings": [asdict(f) for f in report.findings],
+        "notes": [asdict(f) for f in report.notes],
     }
     path.write_text(json.dumps(body, indent=2), encoding="utf-8")
     return path
@@ -340,6 +366,8 @@ def main(argv: list[str] | None = None) -> int:
     path = write_artifact(report)
     for f in report.findings:
         print(f"{f.kind}: {f.when} {f.summary}")
+    for f in report.notes:
+        print(f"note: {f.kind}: {f.when} {f.summary}")
     print(f"health: {len(report.findings)} problem(s) since {report.since}; details in {path}")
     return 1 if report.findings else 0
 

@@ -106,6 +106,9 @@ overwrites it.
 and the `local` tier runs it nightly (`tests/test_health.py`), one test per kind of
 problem: a crash, an ERROR line, Windows refusing most focus changes, the helper not
 running. That is how a problem on the TV reaches the fix pass with nobody reporting it.
+A Kodi crash after Kodi's own last log line ("Exiting the application...") is a WARN and
+a note in the artifact, not a crash: Kodi 21.3 corrupts its heap in its final teardown on
+most exits, after saving everything, and only Kodi can fix that.
 The evidence is in `logs/runtime-health.json`; `python -m tvshell.health` runs it by hand.
 The window is the last 24 hours, cut at the installed helper's build time, so a deployed
 fix clears what came before it. Log an ERROR only for what a fixer should act on, or the
