@@ -1,0 +1,5 @@
+# The helper with levelled logging and crash capture was deployed from the branch before
+# it merged; deploy the merged main so the installed exe is exactly what main holds.
+when = "merged"
+on = "desktop-ml5f3pj"
+run = "python -m tvshell.deploy"

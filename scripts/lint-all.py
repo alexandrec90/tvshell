@@ -28,7 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -51,7 +51,8 @@ _SKIPPED: list[str] = []
 # `sync-devkit.py --check` forbids this repo from editing, so reporting type errors
 # in it would hand the agent findings it is not allowed to fix. Narrowing the scope
 # here is belt to `[tool.mypy] exclude`'s braces in pyproject.toml: the config covers
-# directory recursion, this covers an explicit `mypy .`.
+# directory recursion, this covers an explicit `mypy .`, and `mypy_batches` covers the
+# files a narrowed run names, which mypy checks whatever `exclude` says.
 MYPY_SCOPE = ["tvshell/", "tests/"]
 
 # Every Python path in `sync-devkit.py`'s MANIFEST, kept out of the passes that
@@ -225,6 +226,26 @@ def desktop_targets(paths: list[str], tier: Any | None) -> list[str]:
     ]
 
 
+def dotnet_sdk_missing() -> str:
+    """Why this host cannot build the desktop app, or "" when it can.
+
+    A `dotnet` on PATH is only the host: with no SDK installed it answers every build with
+    "No .NET SDKs were found", which read as a lint finding on a PC that simply lacks one
+    (8448cfc1). So the SDK list is asked too, and an empty one is the same missing host.
+    """
+    if not shutil.which("dotnet"):
+        return "no dotnet on PATH"
+    try:
+        listed = subprocess.run(
+            ["dotnet", "--list-sdks"], capture_output=True, text=True, check=False, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"dotnet --list-sdks did not answer ({exc})"
+    if not (listed.stdout or "").strip():
+        return "dotnet on PATH lists no SDK"
+    return ""
+
+
 def desktop_section(tier: Any | None, changed: list[str], scoped: bool) -> str:
     """The desktop lint's artifact section, with its own log inlined on a failure.
 
@@ -241,8 +262,8 @@ def desktop_section(tier: Any | None, changed: list[str], scoped: bool) -> str:
     if not WINDOWS:
         print("  desktop: the desktop tier needs Windows — skipped")
         return ""
-    if not shutil.which("dotnet"):
-        print("  desktop: no dotnet on PATH — skipped (install the SDK global.json names)")
+    if missing := dotnet_sdk_missing():
+        print(f"  desktop: {missing} — skipped (install the SDK global.json names)")
         return ""
     section = run_tool(
         "desktop", [sys.executable, str(DESKTOP_DRIVER), "lint"], "python scripts/desktop.py lint"
@@ -418,15 +439,17 @@ def rerun_in_tree_venv(module: str, argv: list[str] | None) -> int | None:
     project's own install command and runs this script again inside it; where this
     interpreter already has `module`, or the vendored copy predates that, nothing
     changes.
+
+    Imported by name at run time, not by an `import` statement: the vendored tree is on
+    no mypy search path here, so a run naming this file reported `import-not-found` on
+    the statement, a finding that no edit to the project's own code can fix.
     """
     hooks = REPO_ROOT / "scripts" / "hooks"
     if not (hooks / "toolchain.py").is_file():
         return None
     sys.path.insert(0, str(hooks))
     try:
-        import toolchain
-
-        rerun = toolchain.rerun_in_venv
+        rerun = importlib.import_module("toolchain").rerun_in_venv
     except (ImportError, AttributeError):
         return None
     return rerun(
@@ -550,8 +573,9 @@ def applied_fixes(output: str) -> list[str]:
 
     An unsafe fix changes code, not layout -- F841 deletes an assignment from a test
     being written -- so each change is printed rather than passed over as "ruff: ok".
+    Read with the colour stripped: under `FORCE_COLOR` the head arrives in escape codes.
     """
-    rows = output.splitlines()
+    rows = ANSI.sub("", output).splitlines()
     start = next((i for i, row in enumerate(rows) if FIXED_HEAD.match(row)), len(rows))
     files: list[tuple[str, list[str]]] = []
     for row in rows[start + 1 :]:
@@ -564,19 +588,8 @@ def applied_fixes(output: str) -> list[str]:
     return [f"{path} -- {', '.join(codes)}" for path, codes in files]
 
 
-def _python_passes(targets: list[str], scoped: bool) -> str:
-    """Fix what ruff can, then the artifact's sections for ruff and mypy.
-
-    A narrowed run with only an `.env` or frontend edit leaves `targets` empty, and the
-    scope would then fall back to `["."]` -- silently widening a per-turn check into a
-    whole-repo pass. So a narrowed run with no Python to lint runs no Python pass.
-    """
-    if scoped and not targets:
-        return ""
-    scope = targets or ["."]
-    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-    # must stay sequential relative to each other, and both skip the vendored
-    # harness — see NO_FIX_SCOPE.
+def _fix_python(scope: list[str]) -> None:
+    """`ruff check --fix` then `ruff format` over `scope`, saying what the fix rewrote."""
     no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
     fix = ["check", *scope, "--fix", "--unsafe-fixes", "--show-fixes", *no_fix]
     fixed = subprocess.run(
@@ -593,19 +606,98 @@ def _python_passes(targets: list[str], scoped: bool) -> str:
         cwd=REPO_ROOT,
         capture_output=True,
     )
+
+
+def _python_passes(targets: list[str], scoped: bool) -> str:
+    """Fix what ruff can, then the artifact's sections for ruff and mypy.
+
+    A narrowed run with only an `.env` or frontend edit leaves `targets` empty, and the
+    scope would then fall back to `["."]` -- silently widening a per-turn check into a
+    whole-repo pass. So a narrowed run with no Python to lint runs no Python pass.
+    """
+    if scoped and not targets:
+        return ""
+    scope = targets or ["."]
+    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
+    # must stay sequential relative to each other, and both skip the vendored
+    # harness — see NO_FIX_SCOPE, and `manifest_paths` for a named vendored file.
+    owned = manifest_paths()
+    fixable = [path for path in targets if not vendored(path, owned)] if targets else scope
+    if fixable:
+        _fix_python(fixable)
     sections = run_tool(
         "ruff",
         [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
         "ruff check . --fix --unsafe-fixes",
     )
-    scope_dirs = mypy_scope()
-    if not (targets or scope_dirs):
-        return sections
-    return sections + run_tool(
-        "mypy",
-        [sys.executable, "-m", "mypy", *(targets or scope_dirs), "--show-error-codes"],
-        f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
-    )
+    batches = mypy_batches(targets) if targets else [mypy_scope()]
+    for batch in (b for b in batches if b):
+        sections += run_tool(
+            "mypy",
+            [sys.executable, "-m", "mypy", *batch, "--show-error-codes"],
+            f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
+        )
+    return sections
+
+
+def manifest_paths() -> frozenset[str]:
+    """Every path `sync-devkit.py` vendors here, empty where that cannot be read.
+
+    `NO_FIX_SCOPE` names directories, and the MANIFEST also vendors scripts beside this
+    one -- `ship.py`, `log-wrap.py` -- so a narrowed run type-checked them and reported
+    `import-not-found` findings this repo may not fix. The vendored `structure_check`
+    already reads the MANIFEST literal; a copy older than its `vendored_paths` leaves
+    `NO_FIX_SCOPE` alone in charge.
+    """
+    hooks = REPO_ROOT / "scripts" / "hooks"
+    if not (hooks / "structure_check.py").is_file():
+        return frozenset()
+    if str(hooks) not in sys.path:
+        sys.path.insert(0, str(hooks))
+    try:
+        return frozenset(importlib.import_module("structure_check").vendored_paths(REPO_ROOT))
+    except (ImportError, AttributeError):
+        return frozenset()
+
+
+def vendored(path: str, owned: frozenset[str] | None = None) -> bool:
+    """True for the harness, which this repo may not edit: a path under `NO_FIX_SCOPE`
+    or one the MANIFEST names (`owned`, read here when not given)."""
+    if any(path == root or path.startswith(f"{root}/") for root in NO_FIX_SCOPE):
+        return True
+    return path in (manifest_paths() if owned is None else owned)
+
+
+def conftest_root(path: str) -> str:
+    """The nearest directory above `path` holding a `conftest.py`, "" when none does."""
+    for parent in PurePosixPath(path).parents:
+        if (REPO_ROOT / parent / "conftest.py").is_file():
+            return parent.as_posix()
+    return ""
+
+
+def mypy_batches(targets: list[str]) -> list[list[str]]:
+    """`targets` as one mypy invocation per `conftest` root, vendored files dropped.
+
+    Every `conftest.py` is a top-level module named `conftest` to mypy, and each file
+    argument puts its own directory on the search path, so one run over
+    `tests/test_a.py` and `scripts/hooks/tests/test_ship.py` resolved the hook tests'
+    `from conftest import load_module` to `tests/conftest.py`: eight `attr-defined`
+    errors that neither half has alone (cbb1017b). A file under no root joins the first
+    batch. The vendored files go because `[tool.mypy] exclude` is not applied to a file
+    named on the command line, and a finding in them is one this repo cannot fix.
+    """
+    batches: dict[str, list[str]] = {}
+    owned = manifest_paths()
+    for path in targets:
+        if not vendored(path, owned):
+            batches.setdefault(conftest_root(path), []).append(path)
+    loose = batches.pop("", [])
+    rooted = list(batches.values())
+    if rooted:
+        rooted[0] += loose
+        return rooted
+    return [loose] if loose else []
 
 
 def mypy_scope() -> list[str]:

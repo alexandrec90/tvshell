@@ -77,12 +77,39 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
   keys itself (`PadKeys`), only while the app has focus. Its tile keeps Steam's default
   (key-less) layout so no press lands twice.
 - **Chrome hands off to a new browser process and exits**; the web-app launcher
-  (`WebApp`, today YouTube only) finds the real one by its profile path.
+  (`WebApp`, today YouTube only) finds the real one by its profile path. Everywhere else the YouTube browser is also told
+  apart from the person's own Chrome by that profile on its command line, never by
+  `youtube.pid` alone: a killed launcher leaves the file behind and Windows reuses PIDs.
+- **Only the TV's own windows stay on the TV.** When the displays come back in a
+  different layout Windows moves open windows around, and an app that lands on the TV
+  saves that position and reopens there, out of reach of the confined mouse. So any
+  other titled top-level window found on the TV goes back to the desk (`TvSeat`); a
+  tray toggle turns that off, and a window that refuses the move or keeps returning
+  is left alone after three tries.
 
-It also re-applies three patches to third-party Kodi add-ons on every start, because an
-add-on update overwrites them (`EnsurePlutoRealAds`): SlyGuy's bandwidth cap accepting
-decimals, Pluto's server-side ads, and a browser User-Agent for CBC Radio, whose server
-stalls Python's default one.
+It also re-applies two patches to third-party Kodi add-ons on every start, because an
+add-on update overwrites them (`EnsureAddonPatches`): SlyGuy's bandwidth cap accepting
+decimals, and a browser User-Agent for CBC Radio, whose server stalls Python's default
+one. A patch whose target code has changed logs an ERROR, since it then does nothing.
+
+## Logging and the runtime health check
+
+The helper and every launcher write one shared log, `%LOCALAPPDATA%/TvShell/tvshell.log`,
+rotated to `tvshell.old.log` at 4 MB. Each line is `time LEVEL role[pid] message`, and
+the level is a contract: **ERROR means a defect someone has to fix**, WARN is worth
+knowing, INFO is the story. Every focus change is logged with the process that took it,
+so a "lost focus" has a culprit; every TV app's exit is logged with its exit code; a
+crash is an ERROR, and Kodi's own log is copied to `crashes/` before its next start
+overwrites it.
+
+`tvshell/health.py` reads all of that, plus the Windows Application log's crash events,
+and the `local` tier runs it nightly (`tests/test_health.py`), one test per kind of
+problem: a crash, an ERROR line, Windows refusing most focus changes, the helper not
+running. That is how a problem on the TV reaches the fix pass with nobody reporting it.
+The evidence is in `logs/runtime-health.json`; `python -m tvshell.health` runs it by hand.
+The window is the last 24 hours, cut at the installed helper's build time, so a deployed
+fix clears what came before it. Log an ERROR only for what a fixer should act on, or the
+tier stays red over noise.
 
 ## Commands
 
@@ -91,7 +118,8 @@ python -m tvshell.deploy                    # build helper/TvShell.cs and instal
 python -m tvshell.steam_shortcuts --vdf <Steam userdata/<id>/config/shortcuts.vdf>   # Steam closed
 python -m tvshell.kodi install <addon id>   # Kodi running; answers its prompts
 python -m tvshell.slyguy set max_bandwidth 0.7   # Kodi closed
-python scripts/e2e.py                       # the local tier: the helper compiles
+python -m tvshell.health                    # the TV's last 24 h: crashes, errors, focus
+python scripts/e2e.py                       # the local tier: the helper compiles, the TV is healthy
 ```
 
 ## Tooling
@@ -142,8 +170,9 @@ here is a fork that will disagree with it the first time either is edited.
 - **No test touches the real Steam, Kodi or Windows.** Kodi's sockets are faked with a
   local TCP/UDP server on port 0 (`tests/test_kodi.py`); Steam's file and SlyGuy's
   database live in `tmp_path`; process listing and `taskkill` are monkeypatched.
-- **`local` marks what needs this PC** — today, compiling the helper with `csc.exe`.
-  `addopts` deselects it; `scripts/e2e.py` runs it.
+- **`local` marks what needs this PC**: compiling the helper with `csc.exe`, and the
+  runtime health check against the real logs and event log. `addopts` deselects it;
+  `scripts/e2e.py` runs it.
 - **The C# helper's logic has no unit tests**, only the compile check. It is
   window-and-focus code against live Win32 state; see `TODO.md`.
 

@@ -210,6 +210,20 @@ def test_build_reports_compiler_failure(monkeypatch, tmp_path):
     assert "CS1002" in (tmp_path / "logs" / "build-helper.log").read_text()
 
 
+def test_build_in_a_checkout_without_logs_dir(monkeypatch, tmp_path):
+    # regression: a fresh worktree has no logs/ (it is ignored), and the build crashed
+    # writing its compiler log there instead of building
+    monkeypatch.setattr(deploy, "REPO", tmp_path)
+    monkeypatch.setattr(deploy, "find_csc", lambda: Path("csc.exe"))
+    monkeypatch.setattr(
+        deploy.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="ok", stderr=""),
+    )
+    deploy.build(tmp_path / "logs" / "TvShell.exe")
+    assert (tmp_path / "logs" / "build-helper.log").read_text() == "ok"
+
+
 def test_build_without_compiler(monkeypatch, tmp_path):
     monkeypatch.setattr(deploy, "find_csc", lambda: None)
     with pytest.raises(SystemExit, match="compiler not found"):
