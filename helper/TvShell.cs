@@ -210,11 +210,81 @@ static class Pad {
     }
 }
 
+// Which windows may sit on the TV. Windows moves open windows around when the displays come back
+// in a different layout, and an app (a browser, say) then saves that position and reopens on the
+// TV, where the mouse - confined to the desk - cannot reach it. So an ordinary desk window found
+// on the TV goes back to the desk. Only what the TV runs stays: Kodi, Steam (Big Picture and its
+// menus), the YouTube browser, and the game and its store launcher.
+static class TvSeat {
+    static readonly string[] TvProcesses = { "kodi", "steam", "steamwebhelper", "gameoverlayui", "gameoverlayui64" };
+
+    // `process` is the process name without ".exe"; `youTube` says the window is the YouTube
+    // browser's, which is an ordinary chrome process told apart only by its profile.
+    public static bool BelongsOnTv(string process, bool youTube, string game, string gameLauncher) {
+        if (youTube) return true;
+        var p = process ?? "";
+        if (TvProcesses.Any(t => string.Equals(t, p, StringComparison.OrdinalIgnoreCase))) return true;
+        return (game.Length > 0 && string.Equals(p, game, StringComparison.OrdinalIgnoreCase))
+            || (gameLauncher.Length > 0 && string.Equals(p, gameLauncher, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // The YouTube browser: chrome's main process (no --type= switch) on the TvShell profile. A
+    // recorded PID alone is not enough: if the launcher is killed its PID file stays, and Windows
+    // may give that PID to the person's own Chrome.
+    public static bool IsYouTubeBrowser(string commandLine, string profile) {
+        var cmd = commandLine ?? "";
+        return profile.Length > 0 && cmd.IndexOf(profile, StringComparison.OrdinalIgnoreCase) >= 0
+            && cmd.IndexOf("--type=", StringComparison.Ordinal) < 0;
+    }
+
+    // Where a window found on the TV goes on the desk: the same offset from the top-left corner,
+    // its size kept but never larger than the desk, and wholly on the desk.
+    public static Rectangle DeskRect(Rectangle win, Rectangle tv, Rectangle desk) {
+        int w = Math.Min(win.Width, desk.Width), h = Math.Min(win.Height, desk.Height);
+        int x = desk.X + Math.Max(0, Math.Min(win.X - tv.X, desk.Width - w));
+        int y = desk.Y + Math.Max(0, Math.Min(win.Y - tv.Y, desk.Height - h));
+        return new Rectangle(x, y, w, h);
+    }
+
+    // `TvShell.exe tv-seat belongs <process> <youtube 0|1> <game|-> <launcher|->`: exits 1 when
+    // the window stays on the TV, 0 when it goes to the desk.
+    // `TvShell.exe tv-seat youtube <command line> <profile>`: exits 1 for the YouTube browser.
+    // `TvShell.exe tv-seat desk-rect <x,y,w,h win> <tv> <desk>`: prints x,y,w,h, exits 0.
+    // All exit 254 on bad arguments. Lets the tests exercise these without windows or displays.
+    public static int Cli(string[] args) {
+        if (args.Length == 6 && args[1] == "belongs" && (args[3] == "0" || args[3] == "1"))
+            return BelongsOnTv(args[2], args[3] == "1", args[4] == "-" ? "" : args[4], args[5] == "-" ? "" : args[5]) ? 1 : 0;
+        if (args.Length == 4 && args[1] == "youtube") return IsYouTubeBrowser(args[2], args[3]) ? 1 : 0;
+        if (args.Length == 5 && args[1] == "desk-rect") {
+            Rectangle win, tv, desk;
+            if (!ParseRect(args[2], out win) || !ParseRect(args[3], out tv) || !ParseRect(args[4], out desk)) return 254;
+            var r = DeskRect(win, tv, desk);
+            Console.WriteLine(r.X + "," + r.Y + "," + r.Width + "," + r.Height);
+            return 0;
+        }
+        return 254;
+    }
+    static bool ParseRect(string s, out Rectangle r) {
+        r = Rectangle.Empty;
+        var p = s.Split(',');
+        int x, y, w, h;
+        if (p.Length != 4 || !int.TryParse(p[0], out x) || !int.TryParse(p[1], out y) || !int.TryParse(p[2], out w) || !int.TryParse(p[3], out h)) return false;
+        r = new Rectangle(x, y, w, h);
+        return true;
+    }
+}
+
 static class N {
     public delegate bool EnumProc(IntPtr h, IntPtr l);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
+    public static bool IsCloaked(IntPtr h) { int c; return DwmGetWindowAttribute(h, 14 /*DWMWA_CLOAKED*/, out c, 4) == 0 && c != 0; }
+    public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, 256); return sb.ToString(); }
     [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr h);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
@@ -325,6 +395,7 @@ static class Program {
         if (mode == "desk-key") return DeskKeys.Cli(args);
         if (mode == "close-store-launcher") return Launcher.CloseStoreLauncherCli();
         if (mode == "pad-press") return Pad.Cli(args);
+        if (mode == "tv-seat") return TvSeat.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "launch") return Launcher.Run();
         if (mode == "kodi") return KodiLauncher.Run(args.Length > 1 ? args[1].ToLowerInvariant() : "tv");
@@ -521,7 +592,7 @@ static class YouTubeLauncher {
         var tv = TvDisplay.Find();
         if (tv == null) { Cfg.Log("youtube launcher: no TV display, not opening"); return 1; }
         var b = tv.Bounds;
-        var profile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "yt-profile");
+        var profile = Profile;
         // YouTube only serves its TV ("leanback") interface to TV devices, so identify as one.
         const string ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)";
         var args = string.Format("--user-data-dir=\"{0}\" --kiosk --window-position={1},{2} --window-size={3},{4} --user-agent=\"{5}\" " +
@@ -540,24 +611,40 @@ static class YouTubeLauncher {
         Cfg.Log("youtube launcher: closed");
         return 0;
     }
+    public static readonly string Profile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "yt-profile");
     static Process FindBrowser(string profile) {
         try {
             using (var q = new System.Management.ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='chrome.exe'"))
-                foreach (System.Management.ManagementObject o in q.Get()) {
-                    var cmd = (o["CommandLine"] as string) ?? "";
-                    if (cmd.IndexOf(profile, StringComparison.OrdinalIgnoreCase) >= 0 && cmd.IndexOf("--type=", StringComparison.Ordinal) < 0)
+                foreach (System.Management.ManagementObject o in q.Get())
+                    if (TvSeat.IsYouTubeBrowser(o["CommandLine"] as string, profile))
                         return Process.GetProcessById(Convert.ToInt32(o["ProcessId"]));
-                }
         } catch { }
         return null;
+    }
+    // Whether a PID is the YouTube browser, by its command line. Cached per process (PID and start
+    // time, so a reused PID is checked afresh) so the once-a-second checks do not query WMI each time.
+    static readonly Dictionary<int, KeyValuePair<DateTime, bool>> browserChecks = new Dictionary<int, KeyValuePair<DateTime, bool>>();
+    public static bool IsBrowser(int pid) {
+        try {
+            var start = Process.GetProcessById(pid).StartTime;
+            KeyValuePair<DateTime, bool> c;
+            if (browserChecks.TryGetValue(pid, out c) && c.Key == start) return c.Value;
+            string cmd = null;
+            using (var q = new System.Management.ManagementObjectSearcher("SELECT CommandLine FROM Win32_Process WHERE ProcessId=" + pid))
+                foreach (System.Management.ManagementObject o in q.Get()) cmd = o["CommandLine"] as string;
+            if (browserChecks.Count > 200) browserChecks.Clear();
+            bool ok = TvSeat.IsYouTubeBrowser(cmd, Profile);
+            browserChecks[pid] = new KeyValuePair<DateTime, bool>(start, ok);
+            return ok;
+        } catch { return false; }
     }
 }
 
 class Helper : Form {
     NotifyIcon tray;
     System.Windows.Forms.Timer timer;
-    ToolStripMenuItem miTv, miDesk, miBp, miMouse;
-    bool keepBp = true, lockMouse = true;
+    ToolStripMenuItem miTv, miDesk, miBp, miMouse, miDeskWin;
+    bool keepBp = true, lockMouse = true, keepDeskOffTv = true;
     System.Windows.Forms.Timer mouseTimer;
     int reclips = 0; DateTime reclipLogged = DateTime.Now;
     byte[] padReport = null; DateTime lastPadFocus = DateTime.MinValue;
@@ -578,8 +665,11 @@ class Helper : Form {
             lockMouse = !lockMouse; miMouse.Checked = lockMouse;
             if (!lockMouse) { N.RECT all = new N.RECT { L = -32000, T = -32000, R = 32000, B = 32000 }; N.ClipCursor(ref all); }
         }) { Checked = true };
+        miDeskWin = new ToolStripMenuItem("Keep desk windows off the TV", null, (s, e) => {
+            keepDeskOffTv = !keepDeskOffTv; miDeskWin.Checked = keepDeskOffTv; deskMoves.Clear();
+        }) { Checked = true };
         if (Game.Configured) menu.Items.AddRange(new ToolStripItem[] { miTv, miDesk, new ToolStripSeparator() });
-        menu.Items.AddRange(new ToolStripItem[] { miBp, miMouse,
+        menu.Items.AddRange(new ToolStripItem[] { miBp, miMouse, miDeskWin,
             new ToolStripMenuItem("Open log", null, (s, e) => { try { Process.Start("notepad.exe", Cfg.LogFile); } catch { } }),
             new ToolStripSeparator(), new ToolStripMenuItem("Exit", null, (s, e) => Close()) });
         Icon ico = SystemIcons.Application;
@@ -827,14 +917,81 @@ class Helper : Form {
         return w.Count > 0 ? w[0] : IntPtr.Zero;
     }
 
-    // YouTube runs in its own Chrome (separate profile, kiosk); the launcher records its PID.
-    static IntPtr YouTubeWindow() {
+    // YouTube runs in its own Chrome (separate profile, kiosk); the launcher records its PID, and
+    // the PID counts only while its process really is that browser (see TvSeat.IsYouTubeBrowser).
+    static uint badYouTubePid = 0;
+    static uint YouTubePid() {
         try {
-            if (!File.Exists(Cfg.YouTubePidFile)) return IntPtr.Zero;
+            if (!File.Exists(Cfg.YouTubePidFile)) return 0;
             uint pid = uint.Parse(File.ReadAllText(Cfg.YouTubePidFile).Trim());
-            var w = N.WindowsOf(p => p == pid, t => t.Length > 0);
-            return w.Count > 0 ? w[0] : IntPtr.Zero;
-        } catch { return IntPtr.Zero; }
+            if (YouTubeLauncher.IsBrowser((int)pid)) return pid;
+            if (pid != badYouTubePid) { badYouTubePid = pid; Cfg.Log("youtube.pid names process " + pid + ", which is not the YouTube browser -> ignored"); }
+            return 0;
+        } catch { return 0; }
+    }
+    static IntPtr YouTubeWindow() {
+        uint pid = YouTubePid();
+        if (pid == 0) return IntPtr.Zero;
+        var w = N.WindowsOf(p => p == pid, t => t.Length > 0);
+        return w.Count > 0 ? w[0] : IntPtr.Zero;
+    }
+
+    // Ordinary desk windows found on the TV go back to the desk (see TvSeat). Only top-level
+    // app windows with a title bar: no tool windows, popups owned by another window (they follow
+    // their owner), cloaked windows or the taskbar. A window Windows will not let us move (an
+    // elevated one), or one that keeps going back, is left alone after a few tries.
+    readonly Dictionary<IntPtr, int> deskMoves = new Dictionary<IntPtr, int>();
+    void SendDeskWindowsHome(Screen tv) {
+        if (!keepDeskOffTv) return;
+        uint me = (uint)Process.GetCurrentProcess().Id;
+        var desk = Desk().WorkingArea;
+        var names = new Dictionary<uint, string>();
+        var stray = new List<IntPtr>();
+        N.EnumWindows((h, l) => {
+            if (!N.IsWindowVisible(h) || N.IsIconic(h) || N.GetWindow(h, 4 /*GW_OWNER*/) != IntPtr.Zero) return true;
+            int style = N.GetWindowLong(h, -16), ex = N.GetWindowLong(h, -20);
+            if ((style & 0x00C00000 /*WS_CAPTION*/) != 0x00C00000 || (ex & 0x80 /*WS_EX_TOOLWINDOW*/) != 0) return true;
+            var r = N.Rect(h);
+            if (!tv.Bounds.Contains(new Point(r.X + r.Width / 2, r.Y + r.Height / 2))) return true;
+            uint pid; N.GetWindowThreadProcessId(h, out pid);
+            if (pid == me || N.IsCloaked(h)) return true;
+            var cls = N.ClassOf(h);
+            if (cls == "Shell_SecondaryTrayWnd" || cls == "Shell_TrayWnd" || cls == "Progman" || cls == "WorkerW") return true;
+            string name;
+            if (!names.TryGetValue(pid, out name)) {
+                try { name = Process.GetProcessById((int)pid).ProcessName; } catch { name = ""; }
+                names[pid] = name;
+            }
+            // The YouTube browser by its own command line, not youtube.pid: the launcher writes
+            // that file only once the window is already up.
+            bool yt = string.Equals(name, "chrome", StringComparison.OrdinalIgnoreCase) && YouTubeLauncher.IsBrowser((int)pid);
+            if (!TvSeat.BelongsOnTv(name, yt, Game.Process, Game.LauncherProcess)) stray.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        foreach (var dead in deskMoves.Keys.Where(h => !N.IsWindow(h)).ToList()) deskMoves.Remove(dead);
+        foreach (var h in stray) {
+            int tries; deskMoves.TryGetValue(h, out tries);
+            if (tries >= 3) continue;
+            deskMoves[h] = ++tries;
+            var sb = new StringBuilder(256); N.GetWindowText(h, sb, 256);
+            uint pid; N.GetWindowThreadProcessId(h, out pid);
+            var what = names[pid] + " '" + sb + "'";
+            // A maximized window stays on its monitor, so un-maximize, move, maximize again. Both
+            // ShowWindow calls activate it; focus goes back to where it was, so the move never
+            // takes the controller's window away from the TV.
+            var fg = N.GetForegroundWindow();
+            bool max = N.IsZoomed(h);
+            if (max) N.ShowWindow(h, 9 /*SW_RESTORE*/);
+            var to = TvSeat.DeskRect(N.Rect(h), tv.Bounds, desk);
+            bool ok = N.SetWindowPos(h, IntPtr.Zero, to.X, to.Y, to.Width, to.Height, N.SWP_NOZORDER | N.SWP_NOACTIVATE);
+            if (max) N.ShowWindow(h, 3 /*SW_MAXIMIZE*/);
+            if (fg != h && fg != IntPtr.Zero && N.GetForegroundWindow() != fg) N.Focus(fg);
+            var now = N.Rect(h);
+            ok = ok && !tv.Bounds.Contains(new Point(now.X + now.Width / 2, now.Y + now.Height / 2));
+            if (ok) Cfg.Log("desk window on the TV -> moved to the desk: " + what);
+            else Cfg.Log("desk window on the TV -> Windows refused the move (an elevated window?): " + what);
+            if (tries == 3) Cfg.Log("desk window keeps returning to the TV -> left there: " + what);
+        }
     }
     static IntPtr TvAppWindow() { var k = KodiWindow(); return k != IntPtr.Zero ? k : YouTubeWindow(); }
 
@@ -981,6 +1138,7 @@ class Helper : Form {
         // --- Big Picture ---
         if (tv == null) return;
         KeepTvApps(tv);
+        SendDeskWindowsHome(tv);
         var web = new HashSet<uint>(Process.GetProcessesByName("steamwebhelper").Select(p => (uint)p.Id));
         var bp = N.WindowsOf(web.Contains, t => t == "Steam Big Picture Mode");
         if (bp.Count > 0) {

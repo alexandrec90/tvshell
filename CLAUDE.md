@@ -69,7 +69,15 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
 - **Kodi cannot be placed on a monitor reliably**, so it runs windowed and the helper
   strips the border and fits the client area to the TV.
 - **Chrome hands off to a new browser process and exits**; the YouTube launcher finds
-  the real one by its profile path.
+  the real one by its profile path. Everywhere else the YouTube browser is also told
+  apart from the person's own Chrome by that profile on its command line, never by
+  `youtube.pid` alone: a killed launcher leaves the file behind and Windows reuses PIDs.
+- **Only the TV's own windows stay on the TV.** When the displays come back in a
+  different layout Windows moves open windows around, and an app that lands on the TV
+  saves that position and reopens there, out of reach of the confined mouse. So any
+  other titled top-level window found on the TV goes back to the desk (`TvSeat`); a
+  tray toggle turns that off, and a window that refuses the move or keeps returning
+  is left alone after three tries.
 
 It also re-applies three patches to third-party Kodi add-ons on every start, because an
 add-on update overwrites them (`EnsurePlutoRealAds`): SlyGuy's bandwidth cap accepting
