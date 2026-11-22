@@ -14,6 +14,7 @@ from tvshell import deploy
         ('"C:\\Users\\u\\TvShell\\TvShell.exe" launch', True),
         ('"C:\\Users\\u\\TvShell\\TvShell.exe" kodi tv', True),
         ('"C:\\Users\\u\\TvShell\\TvShell.exe"  youtube', True),
+        ('"C:\\Users\\u\\TvShell\\TvShell.exe" backwhen-app', True),
         ('"C:\\Users\\u\\TvShell\\TvShell.exe" --unknown', False),
         ("something.exe launch", False),
     ],
@@ -69,6 +70,35 @@ def locked(monkeypatch, *names: str) -> None:
         real(self, missing_ok=missing_ok)
 
     monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_install_clears_old_asides_once_nothing_runs_from_them(tmp_path):
+    (tmp_path / "TvShell.exe").write_bytes(b"current")
+    (tmp_path / "TvShell.prev.exe").write_bytes(b"older")
+    (tmp_path / "TvShell.prev-1.exe").write_bytes(b"older still")
+    staged = tmp_path / "TvShell.new.exe"
+    staged.write_bytes(b"new")
+    deploy.install(staged, tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["TvShell.exe"]
+
+
+def test_free_aside_skips_names_in_use(tmp_path):
+    assert deploy.free_aside(tmp_path) == tmp_path / "TvShell.prev.exe"
+    (tmp_path / "TvShell.prev.exe").write_bytes(b"")
+    (tmp_path / "TvShell.prev-1.exe").write_bytes(b"")
+    assert deploy.free_aside(tmp_path) == tmp_path / "TvShell.prev-2.exe"
+
+
+def test_remove_asides_keeps_the_held_one_and_the_installed_exe(monkeypatch, tmp_path):
+    for name in ("TvShell.exe", "TvShell.prev.exe", "TvShell.prev-1.exe", "TvShell.new.exe"):
+        (tmp_path / name).write_bytes(b"")
+    locked(monkeypatch, "TvShell.prev-1.exe")
+    deploy.remove_asides(tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "TvShell.exe",
+        "TvShell.new.exe",
+        "TvShell.prev-1.exe",
+    ]
 
 
 def test_install_with_old_exe_still_running(monkeypatch, tmp_path):

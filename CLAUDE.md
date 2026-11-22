@@ -3,7 +3,11 @@
 A TV media centre on a second display: Steam Big Picture runs full-screen on the TV,
 the desk monitor stays an ordinary desktop, and a game controller drives the TV side.
 Big Picture tiles launch Kodi (live TV, radio, CBC Gem), YouTube's TV interface and,
-optionally, one game.
+optionally, BackWhenTV's Windows app and one game. The app's tile appears once its portable
+exe is in `backwhentv-app/` in the install directory; the repository does not download it.
+BackWhenTV's web player was tried and dropped: it streams raw tape rips from the Internet
+Archive that the archive serves slower than they play, so its channels never start. Its
+tile is in `tiles.RETIRED_TILES`, which `steam_shortcuts` removes.
 
 **The repository names no game.** The game is whatever the local `game.cfg` in the install
 directory says (process, store launcher, launch arguments, tile name, icon); without that
@@ -68,8 +72,12 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
   covers the game with a black screen.
 - **Kodi cannot be placed on a monitor reliably**, so it runs windowed and the helper
   strips the border and fits the client area to the TV.
-- **Chrome hands off to a new browser process and exits**; the YouTube launcher finds
-  the real one by its profile path. Everywhere else the YouTube browser is also told
+- **The BackWhenTV app reads only the keyboard**, and Steam Input's keyboard bindings did
+  not reach its web player's window either, so the helper turns controller presses into
+  keys itself (`PadKeys`), only while the app has focus. Its tile keeps Steam's default
+  (key-less) layout so no press lands twice.
+- **Chrome hands off to a new browser process and exits**; the web-app launcher
+  (`WebApp`, today YouTube only) finds the real one by its profile path. Everywhere else the YouTube browser is also told
   apart from the person's own Chrome by that profile on its command line, never by
   `youtube.pid` alone: a killed launcher leaves the file behind and Windows reuses PIDs.
 - **Only the TV's own windows stay on the TV.** When the displays come back in a

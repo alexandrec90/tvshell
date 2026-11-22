@@ -77,6 +77,30 @@ def test_apply_leaves_other_entries_and_trailing_bytes_untouched():
     assert report[0].startswith("added Live TV: appid ")
 
 
+def test_retire_removes_only_our_retired_tiles_and_renumbers():
+    ours = ss.new_entry(Tile("Old Tile", TILE.exe, "", "", "old"))
+    users = ss.new_entry(Tile("Old Tile", '"C:\\elsewhere\\thing.exe"', "", "", ""))
+    live = ss.new_entry(TILE)
+    shortcuts = {"0": live, "1": ours, "2": users}
+    kept, removed = ss.retire(shortcuts, ("Old Tile",), TILE.exe)
+    assert removed == ["Old Tile"]
+    assert kept == {"0": live, "1": users}
+
+
+def test_retire_with_nothing_to_remove_keeps_order():
+    a, b = ss.new_entry(TILE), ss.new_entry(Tile("Radio", TILE.exe, "", "", "kodi radio"))
+    kept, removed = ss.retire({"0": a, "1": b}, ("Old Tile",), TILE.exe)
+    assert (kept, removed) == ({"0": a, "1": b}, [])
+
+
+def test_apply_removes_a_retired_tile_and_reports_it():
+    retired = ss.new_entry(Tile("Old Tile", TILE.exe, "", "", "old"))
+    new, report = ss.apply(vdf_with(retired), [TILE], retired=("Old Tile",))
+    names = [e["AppName"] for e in ss.parse(new)[0]["shortcuts"].values()]
+    assert names == ["Live TV"]
+    assert report[0] == "removed Old Tile"
+
+
 def test_apply_creates_shortcuts_map_when_missing():
     new, _ = ss.apply(ss.dump({}), [TILE])
     assert ss.parse(new)[0]["shortcuts"]["0"]["AppName"] == "Live TV"
