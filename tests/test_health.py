@@ -201,7 +201,7 @@ def test_crash_findings_attach_kodi_context_only_to_kodi(tmp_path):
         health.Crash(T, "kodi.exe", "VCRUNTIME140.dll", "0xc0000005", "Windows Application log"),
         health.Crash(T, "TvShell.exe", "", "", "Windows Application log"),
     ]
-    kodi, helper = health.crash_findings(crashes, [log])
+    (kodi, helper), _ = health.crash_findings(crashes, [log])
     assert kodi.summary == (
         "kodi.exe crashed (exception 0xc0000005, in VCRUNTIME140.dll), seen in the Windows Application log"
     )
@@ -223,11 +223,12 @@ def test_window_start_cuts_at_the_installed_build(tmp_path):
     assert health.window_start(T, exe) == T - health.WINDOW
 
 
-def make_check(tmp_path, log: str = "", crashes=(), helpers=(1,)):
+def make_check(tmp_path, log: str = "", crashes=(), helpers=(1,), kodi_log: str = ""):
     log_dir, kodi_dir = tmp_path / "TvShell", tmp_path / "Kodi"
     log_dir.mkdir()
     kodi_dir.mkdir()
     (log_dir / "tvshell.log").write_text(log)
+    (kodi_dir / "kodi.log").write_text(kodi_log)
     return health.check(
         now=T,
         log_dir=log_dir,
@@ -252,12 +253,66 @@ def test_check_finds_each_kind(tmp_path):
     assert report.of("crash")[0].when == "2026-11-21 11:35:44"
 
 
+SHUTDOWN = (
+    "2026-11-21 11:35:40.000 T:1 info <general>: Stopping the application...\n"
+    "2026-11-21 11:35:43.900 T:1 info <general>: unload sections\n"
+    "2026-11-21 11:35:44.157 T:1 info <general>: Exiting the application...\n"
+)
+
+
+def test_after_shutdown_reads_kodis_last_line():
+    lines = SHUTDOWN.splitlines()
+    assert health.after_shutdown(lines)
+    assert health.after_shutdown([*lines, "    (... 1 more like the line above)"])
+    # Kodi went on after a line like it, or never got there
+    assert not health.after_shutdown([*lines, "2026-11-21 11:35:44.200 T:1 info <general>: x"])
+    assert not health.after_shutdown(lines[:2])
+    assert not health.after_shutdown([])
+
+
+def test_the_helper_reads_the_same_last_line():
+    source = (health.REPO / "helper" / "TvShell.cs").read_text(encoding="utf-8")
+    assert f'KodiExitedLine = "{health.KODI_EXITED}";' in source
+
+
+def test_check_notes_a_kodi_crash_after_it_finished_shutting_down(tmp_path):
+    # Kodi 21.3 corrupts its heap in its last teardown on this PC: settings and EPG are saved
+    # by then, the fault is Kodi's, and nothing here can fix it. Recorded, but not red.
+    crash = health.Crash(T, "kodi.exe", "ntdll.dll", "0xc0000374", "Windows Application log")
+    report = make_check(tmp_path, crashes=[crash], kodi_log=SHUTDOWN)
+    assert report.findings == []
+    (note,) = report.notes
+    assert note.kind == "crash-on-exit"
+    assert note.summary.startswith("kodi.exe crashed after it finished shutting down")
+    assert note.evidence[-1].endswith("Exiting the application...")
+
+
+def test_check_still_finds_a_kodi_crash_while_it_runs(tmp_path):
+    playing = "2026-11-21 11:35:43.000 T:3 warning <general>: timeout waiting for buffer\n"
+    crash = health.Crash(T, "kodi.exe", "VCRUNTIME140.dll", "0xc0000005", "Windows Application log")
+    report = make_check(tmp_path, crashes=[crash], kodi_log=playing)
+    assert [f.kind for f in report.findings] == ["crash"]
+    assert report.notes == []
+
+
+def test_crash_findings_never_note_a_helper_crash(tmp_path):
+    log = tmp_path / "kodi.log"
+    log.write_text(SHUTDOWN)
+    found, notes = health.crash_findings([health.Crash(T, "TvShell.exe", "", "", "x")], [log])
+    assert [f.kind for f in found] == ["crash"]
+    assert notes == []
+
+
 def test_write_artifact_and_describe(tmp_path):
     report = health.Report("a", "b", [health.Finding("crash", "t", "kodi.exe crashed", ["line"])])
+    report.notes.append(health.Finding("crash-on-exit", "t", "kodi.exe crashed after", []))
     path = health.write_artifact(report, tmp_path / "logs" / "runtime-health.json")
     body = json.loads(path.read_text())
     assert body["findings"] == [
         {"kind": "crash", "when": "t", "summary": "kodi.exe crashed", "evidence": ["line"]}
+    ]
+    assert body["notes"] == [
+        {"kind": "crash-on-exit", "when": "t", "summary": "kodi.exe crashed after", "evidence": []}
     ]
     assert health.describe(report.findings, path) == f"t kodi.exe crashed\nevidence: {path}"
 
@@ -266,6 +321,10 @@ def test_main_exit_code_follows_findings(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(health, "ARTIFACT", tmp_path / "h.json")
     monkeypatch.setattr(health, "check", lambda: health.Report("a", "b", []))
     assert health.main([]) == 0
+    noted = health.Report("a", "b", [], [health.Finding("crash-on-exit", "t", "after")])
+    monkeypatch.setattr(health, "check", lambda: noted)
+    assert health.main([]) == 0
+    assert "note: crash-on-exit: t after" in capsys.readouterr().out
     monkeypatch.setattr(
         health, "check", lambda: health.Report("a", "b", [health.Finding("error", "t", "boom")])
     )

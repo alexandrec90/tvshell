@@ -92,6 +92,20 @@ static class Cfg {
     public static bool Hold(Process p) {
         try { return p != null && p.Handle != IntPtr.Zero; } catch { return false; }
     }
+    // Kodi's last log line, once it has saved its settings and the EPG and unloaded everything.
+    // Must match KODI_EXITED in tvshell/health.py.
+    public const string KodiExitedLine = "Exiting the application...";
+    // Whether an app's log ends with `line`: the app got that far before it went.
+    public static bool LogEndsWith(string path, string line) {
+        try {
+            using (var s = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) {
+                s.Seek(Math.Max(0, s.Length - 4096), SeekOrigin.Begin);
+                var tail = new StreamReader(s).ReadToEnd().TrimEnd();
+                return tail.EndsWith(line, StringComparison.Ordinal);
+            }
+        } catch { return false; }
+    }
+
     public static string ExitOf(Process p) {
         try { return p.HasExited ? "exit " + ExitText(p.ExitCode) : "still running"; } catch { return "exit code unknown"; }
     }
@@ -1289,12 +1303,13 @@ class Helper : Form {
     // Apps that live on the TV (Kodi, BackWhenTV's app, the web apps): keep them there, focus them when
     // they start, never let Big Picture cover them, and bring Big Picture back when they close.
     // Proc is held from the moment its window appears, so its exit code can be read once it is
-    // gone: that is what tells a crash from a close. CrashLog is the app's own log, kept on a crash.
-    class TvApp { public string Name, CrashLog; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending, CoveredLogged; public Process Proc; }
+    // gone: that is what tells a crash from a close. CrashLog is the app's own log, kept on a crash;
+    // ExitedLine is the last line the app logs once it has finished shutting down.
+    class TvApp { public string Name, CrashLog, ExitedLine; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending, CoveredLogged; public Process Proc; }
     readonly List<TvApp> tvApps = new List<TvApp> {
         // Kodi runs windowed (its own monitor switching is unreliable): strip the border and make its
         // drawing area exactly cover the TV, so it renders full-screen there.
-        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, CrashLog = Cfg.KodiLog },
+        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, CrashLog = Cfg.KodiLog, ExitedLine = Cfg.KodiExitedLine },
         // BackWhenTV's app opens borderless full-screen on the primary display: same treatment.
         new TvApp { Name = "BackWhenTV app", Find = BackWhenApp.Window, Borderless = true },
     }.Concat(WebApp.All.Select(a => new TvApp { Name = a.Name, Find = a.Window, Borderless = false })).ToList();
@@ -1312,7 +1327,14 @@ class Helper : Form {
             p.Dispose();
         }
         if (!crashed) { Cfg.Log(a.Name + " closed (" + how + ")"); return; }
+        // Kodi 21.3 corrupts its heap in its last teardown on most exits, after it has saved
+        // everything: Kodi's defect, which nothing here can fix, so a WARN and not an ERROR.
+        bool afterShutdown = a.ExitedLine != null && a.CrashLog != null && Cfg.LogEndsWith(a.CrashLog, a.ExitedLine);
         var kept = a.CrashLog == null ? "" : Cfg.KeepCrashLog(a.Name.ToLowerInvariant(), a.CrashLog);
+        if (afterShutdown) {
+            Cfg.Warn(a.Name + " crashed after it finished shutting down (" + how + ")" + (kept != "" ? "; its log is kept at " + kept : ""));
+            return;
+        }
         Cfg.Error(a.Name + " crashed (" + how + ")" + (kept != "" ? "; its log is kept at " + kept : "")
             + "; the game " + (Game.Running().Length > 0 ? "was" : "was not") + " running");
     }

@@ -1,0 +1,5 @@
+# The helper now logs a Kodi crash after Kodi's last shutdown line as a WARN, not an ERROR;
+# install the merged build so the nightly tier stops seeing that ERROR.
+when = "merged"
+on = "desktop-ml5f3pj"
+run = "python -m tvshell.deploy"
