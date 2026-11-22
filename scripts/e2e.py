@@ -5,7 +5,8 @@ The contract `.claude/rules/local-e2e.md` states, which devkit's nightly `devkit
 job runs in this checkout: exit 0 green, anything else red, each failure printed as a
 `FAILED <id>` line. It runs the tests marked `local`, which `addopts` deselects from every
 other run, because they need this PC: the .NET Framework C# compiler that builds the
-helper (`helper/TvShell.cs`) exists on Windows only.
+helper (`helper/TvShell.cs`) exists on Windows only, and the runtime health check
+(`tvshell/health.py`) reads this PC's own logs and crash events.
 
 **A skip is a failure under the scheduler** (`DEVKIT_E2E` set): the checkout is the one
 the tests were written for, so nothing has a reason left to skip. By hand a skip is listed

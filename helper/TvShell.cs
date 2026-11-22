@@ -25,17 +25,74 @@ static class Cfg {
     public static readonly string ModeFile = Path.Combine(Dir, "game-screen.txt");  // "tv"/"desk", written at launch
     public static readonly string NextFile = Path.Combine(Dir, "next-screen.txt");  // handoff from launch-desk to launch
     public static readonly string LogFile = Path.Combine(Dir, "tvshell.log");
+    public static readonly string OldLogFile = Path.Combine(Dir, "tvshell.old.log");
+    // A crashed app's own log, copied here before its next start overwrites it.
+    public static readonly string CrashDir = Path.Combine(Dir, "crashes");
     public static readonly string YouTubePidFile = Path.Combine(Dir, "youtube.pid");
     public const string KodiExe = @"C:\Program Files\Kodi\kodi.exe";
+    public static readonly string KodiLog = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Kodi\kodi.log");
     public const string ChromeExe = @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe";
     public static string SteamGameId = "";  // filled from steam-gameid.txt next to the exe
-    public static void Log(string m) {
+    public static string Role = "helper";   // which mode wrote a line: the helper and the launchers share the file
+    static readonly int Pid = Process.GetCurrentProcess().Id;
+    const long MaxLog = 4L * 1024 * 1024;
+    static readonly object gate = new object();
+
+    // One line per entry: `yyyy-MM-dd HH:mm:ss.fff LEVEL role[pid] message`. The level is what
+    // the runtime health check (tvshell/health.py) reads: ERROR is a defect someone must fix,
+    // WARN is worth knowing, INFO is the story. A multi-line message (a stack trace) is folded
+    // onto its line with " | ".
+    public static void Log(string m) { Write("INFO", m); }
+    public static void Warn(string m) { Write("WARN", m); }
+    public static void Error(string m) { Write("ERROR", m); }
+    static void Write(string level, string m) {
+        var line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + level.PadRight(5) + " " + Role + "[" + Pid + "] "
+            + (m ?? "").Replace("\r", "").Replace("\n", " | ") + Environment.NewLine;
+        // Another process appending at the same moment is the usual failure: retry, don't drop the line.
+        lock (gate) {
+            for (int i = 0; i < 5; i++) {
+                try {
+                    Directory.CreateDirectory(Dir);
+                    var fi = new FileInfo(LogFile);
+                    // Rotated, not deleted: the hours before a problem are the ones worth reading.
+                    if (fi.Exists && fi.Length > MaxLog) { File.Delete(OldLogFile); File.Move(LogFile, OldLogFile); }
+                    File.AppendAllText(LogFile, line);
+                    return;
+                } catch { Thread.Sleep(25); }
+            }
+        }
+    }
+
+    // An exit code as a person reads it. A crash is an NTSTATUS value (0xC0000005 is an access
+    // violation); `taskkill /F` gives 1.
+    public static bool IsCrash(int code) { return unchecked((uint)code) >= 0xC0000000; }
+    public static string ExitText(int code) {
+        uint u = unchecked((uint)code);
+        if (!IsCrash(code)) return code.ToString();
+        string what = u == 0xC0000005 ? " access violation" : u == 0xC0000409 ? " stack buffer overrun"
+            : u == 0xC00000FD ? " stack overflow" : u == 0xC0000374 ? " heap corruption" : "";
+        return "0x" + u.ToString("X8") + what + ", a crash";
+    }
+
+    // Copy a crashed app's log aside (the app overwrites it on its next start); keeps the last 10.
+    public static string KeepCrashLog(string name, string source) {
         try {
-            Directory.CreateDirectory(Dir);
-            var fi = new FileInfo(LogFile);
-            if (fi.Exists && fi.Length > 512 * 1024) File.Delete(LogFile);
-            File.AppendAllText(LogFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + m + Environment.NewLine);
-        } catch { }
+            if (!File.Exists(source)) return "";
+            Directory.CreateDirectory(CrashDir);
+            var dest = Path.Combine(CrashDir, name + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".log");
+            File.Copy(source, dest, true);
+            foreach (var old in new DirectoryInfo(CrashDir).GetFiles(name + "-*.log").OrderByDescending(f => f.Name).Skip(10)) old.Delete();
+            return dest;
+        } catch (Exception ex) { Warn("could not keep the " + name + " crash log: " + ex.Message); return ""; }
+    }
+
+    // Opens a handle now, so ExitCode can still be read once the process is gone. False when
+    // Windows refuses (an elevated process): the exit code is then unknown.
+    public static bool Hold(Process p) {
+        try { return p != null && p.Handle != IntPtr.Zero; } catch { return false; }
+    }
+    public static string ExitOf(Process p) {
+        try { return p.HasExited ? "exit " + ExitText(p.ExitCode) : "still running"; } catch { return "exit code unknown"; }
     }
 }
 
@@ -110,7 +167,10 @@ static class TvDisplay {
         var ids = all.Select(s => N.MonitorId(s.DeviceName)).ToArray();
         int i = Pick(ids, all.Select(s => s.Primary).ToArray(), Wanted);
         var desc = i < 0 ? "not found among " + string.Join(" | ", ids) : all[i].DeviceName + " " + ids[i] + " " + all[i].Bounds;
-        if (desc != lastLogged) { lastLogged = desc; Cfg.Log("TV display: " + desc); }
+        if (desc != lastLogged) {
+            lastLogged = desc;
+            if (i < 0) Cfg.Warn("TV display: " + desc + " (nothing is moved to the TV)"); else Cfg.Log("TV display: " + desc);
+        }
         return i < 0 ? null : all[i];
     }
 
@@ -314,7 +374,10 @@ static class N {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
-    [DllImport("user32.dll")] public static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] d, uint n, uint size);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool RegisterRawInputDevices(RAWINPUTDEVICE[] d, uint n, uint size);
+    public delegate void WinEventProc(IntPtr hook, uint ev, IntPtr h, int obj, int child, uint thread, uint time);
+    [DllImport("user32.dll")] public static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc fn, uint pid, uint thread, uint flags);
+    [DllImport("user32.dll")] public static extern bool UnhookWinEvent(IntPtr h);
     [DllImport("user32.dll")] public static extern uint GetRawInputData(IntPtr h, uint cmd, IntPtr data, ref uint size, uint hdr);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool EnumDisplayDevices(string dev, uint i, ref DISPLAY_DEVICE dd, uint flags);
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct DISPLAY_DEVICE {
@@ -336,7 +399,7 @@ static class N {
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 
     public delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint thread);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetWindowsHookEx(int id, HookProc fn, IntPtr mod, uint thread);
     [DllImport("user32.dll")] public static extern bool UnhookWindowsHookEx(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string name);
@@ -385,12 +448,14 @@ static class Program {
     [STAThread]
     static int Main(string[] args) {
         N.SetProcessDpiAwarenessContext(new IntPtr(-4)); // per-monitor v2: real pixel coordinates
+        string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+        Cfg.Role = mode == "" ? "helper" : mode;
+        AppDomain.CurrentDomain.UnhandledException += (s, e) => Cfg.Error("unhandled exception, exiting: " + e.ExceptionObject);
         try {
             var gid = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "steam-gameid.txt");
             if (File.Exists(gid)) Cfg.SteamGameId = File.ReadAllText(gid).Trim();
-        } catch { }
+        } catch (Exception ex) { Cfg.Error("cannot read steam-gameid.txt: " + ex.Message); }
         Game.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "game.cfg"));
-        string mode = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         if (mode == "pick-tv") return TvDisplay.Cli(args);
         if (mode == "desk-key") return DeskKeys.Cli(args);
         if (mode == "close-store-launcher") return Launcher.CloseStoreLauncherCli();
@@ -404,9 +469,13 @@ static class Program {
         if (mode == "launch-tv") return Launcher.ViaSteam("tv");
         bool created;
         using (var mtx = new Mutex(true, @"Local\TvShellHelper", out created)) {
-            if (!created) return 0;
+            if (!created) { Cfg.Log("helper already running, this one exits"); return 0; }
             Application.EnableVisualStyles();
+            // An exception on the UI thread is logged and the helper keeps running.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) => Cfg.Error("UI thread exception: " + e.Exception);
             Application.Run(new Helper());
+            Cfg.Log("helper exited");
         }
         return 0;
     }
@@ -417,7 +486,8 @@ static class Launcher {
     public static int ViaSteam(string target) {
         Directory.CreateDirectory(Cfg.Dir);
         File.WriteAllText(Cfg.NextFile, target);
-        if (Cfg.SteamGameId == "") { Cfg.Log("launch-" + target + ": no steam-gameid.txt"); return 1; }
+        if (Cfg.SteamGameId == "") { Cfg.Error("launch-" + target + ": no steam-gameid.txt, the desktop shortcut cannot start the game"); return 1; }
+        Cfg.Log("launch-" + target + ": asking Steam to run tile " + Cfg.SteamGameId);
         Process.Start(new ProcessStartInfo("steam://rungameid/" + Cfg.SteamGameId) { UseShellExecute = true });
         return 0;
     }
@@ -425,7 +495,7 @@ static class Launcher {
     // Steam shortcut target. Steam hooks this process and follows it into the store launcher and
     // from there into the game, which is what gives the game Steam's virtual Xbox controller.
     public static int Run() {
-        if (!Game.Configured || !Game.HasLauncher) { Cfg.Log("launch: game.cfg needs process and launcher"); return 1; }
+        if (!Game.Configured || !Game.HasLauncher) { Cfg.Error("launch: game.cfg needs process and launcher"); return 1; }
         Directory.CreateDirectory(Cfg.Dir);
         string target = "tv";
         try {
@@ -458,13 +528,18 @@ static class Launcher {
             if (i >= 16 && i % 16 == 0) { Cfg.Log("launch: re-sending launch request"); StartLauncher(); }
             Thread.Sleep(500);
         }
-        if (game == null) { Cfg.Log("launch: game never started"); return 2; }
-        Cfg.Log("launch: game pid " + game.Id + " started");
-        try { game.WaitForExit(); } catch { }
-        Cfg.Log("launch: game exited");
+        if (game == null) { Cfg.Warn("launch: game never started within 5 minutes"); return 2; }
+        bool held = Cfg.Hold(game);
+        Cfg.Log("launch: game pid " + game.Id + " started" + (held ? "" : " (exit code will be unknown: no handle)"));
+        try { game.WaitForExit(); } catch (Exception ex) { Cfg.Warn("launch: cannot wait for the game: " + ex.Message); }
+        // The game is not this project's code, so its crash is worth knowing, not a TvShell defect.
+        var gameExit = Cfg.ExitOf(game);
+        if (held && game.HasExited && Cfg.IsCrash(game.ExitCode)) Cfg.Warn("launch: game exited (" + gameExit + ")");
+        else Cfg.Log("launch: game exited (" + gameExit + ")");
         // Steam counts the tile as running while anything it started is alive, and the store
         // launcher stays open after the game: left running, the tile is stuck on "Resume".
-        CloseStoreLauncher("closing store launcher so the tile ends");
+        if (!CloseStoreLauncher("closing store launcher so the tile ends"))
+            Cfg.Error("launch: store launcher still running after 10 s, the tile will show Resume");
         return 0;
     }
 
@@ -475,7 +550,7 @@ static class Launcher {
         var running = Process.GetProcessesByName(Game.LauncherProcess);
         if (running.Length == 0) return true;
         Cfg.Log("launch: " + why + " (" + running.Length + " procs)");
-        foreach (var p in running) { try { p.Kill(); } catch { } }
+        foreach (var p in running) { try { p.Kill(); } catch (Exception ex) { Cfg.Warn("launch: cannot kill store launcher pid " + p.Id + ": " + ex.Message); } }
         for (int i = 0; i < 50; i++) {
             if (Process.GetProcessesByName(Game.LauncherProcess).Length == 0) return true;
             Thread.Sleep(200);
@@ -491,7 +566,7 @@ static class Launcher {
         try {
             Process.Start(new ProcessStartInfo(Game.Launcher, Game.LaunchArgs) {
                 UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(Game.Launcher) });
-        } catch (Exception ex) { Cfg.Log("launch: cannot start store launcher: " + ex.Message); }
+        } catch (Exception ex) { Cfg.Error("launch: cannot start store launcher " + Game.Launcher + ": " + ex.Message); }
     }
 }
 
@@ -507,23 +582,31 @@ static class KodiLauncher {
         Process kodi = Process.GetProcessesByName("kodi").FirstOrDefault();
         bool started = false;
         if (kodi == null) {
-            kodi = Process.Start(new ProcessStartInfo(Cfg.KodiExe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(Cfg.KodiExe) });
+            try {
+                kodi = Process.Start(new ProcessStartInfo(Cfg.KodiExe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(Cfg.KodiExe) });
+            } catch (Exception ex) { Cfg.Error("kodi launcher: cannot start " + Cfg.KodiExe + ": " + ex.Message); return 1; }
             started = true;
         }
-        Cfg.Log("kodi launcher: " + target + (started ? " (starting Kodi)" : " (Kodi already running)"));
-        if (!WaitForKodi(60)) { Cfg.Log("kodi launcher: Kodi never became ready"); return 1; }
+        Cfg.Log("kodi launcher: " + target + (started ? " (starting Kodi, pid " + kodi.Id + ")" : " (Kodi already running, pid " + kodi.Id + ")"));
+        if (!WaitForKodi(60)) { Cfg.Error("kodi launcher: Kodi never answered on its JSON-RPC port 9090 within 60 s"); return 1; }
         if (target == "tv") {
             // Resume the last-watched channel. PVR channels load a few seconds after start, so retry.
-            for (int i = 0; i < 15 && !IsPlaying(); i++) {
+            bool playing = false;
+            for (int i = 0; i < 15 && !(playing = IsPlaying()); i++) {
                 var ch = LastChannel();
                 if (ch > 0) { Rpc("Player.Open", "{\"item\":{\"channelid\":" + ch + "}}"); Cfg.Log("kodi launcher: playing channel " + ch); Thread.Sleep(6000); }
                 else Thread.Sleep(2000);
             }
+            if (!playing) Cfg.Warn("kodi launcher: no channel started playing after 15 tries");
         } else if (Sections.ContainsKey(target)) {
             Builtin("PlayerControl(Stop)"); Thread.Sleep(500);
             Builtin(Sections[target]);
+        } else Cfg.Warn("kodi launcher: unknown section '" + target + "'");
+        // The helper is the one witness of how Kodi ends (crash log, ERROR); this is the tile's record.
+        if (started) {
+            try { kodi.WaitForExit(); } catch (Exception ex) { Cfg.Warn("kodi launcher: cannot wait for Kodi: " + ex.Message); }
+            Cfg.Log("kodi launcher: Kodi exited (" + Cfg.ExitOf(kodi) + "), the tile ends");
         }
-        if (started) { try { kodi.WaitForExit(); } catch { } }
         return 0;
     }
     static bool WaitForKodi(int seconds) {
@@ -552,6 +635,7 @@ static class KodiLauncher {
         try {
             using (var c = new System.Net.Sockets.TcpClient("127.0.0.1", 9090)) {
                 var s = c.GetStream(); s.ReadTimeout = 5000;
+                if (method != "Player.GetActivePlayers") Cfg.Log("kodi rpc: " + method);
                 var req = Encoding.UTF8.GetBytes("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"" + method + "\",\"params\":" + prms + "}");
                 s.Write(req, 0, req.Length);
                 var buf = new byte[1 << 20]; var sb = new StringBuilder(); int depth = 0; bool started = false;
@@ -567,7 +651,7 @@ static class KodiLauncher {
                 }
                 return sb.ToString();
             }
-        } catch { return ""; }
+        } catch (Exception ex) { Cfg.Warn("kodi rpc " + method + " failed: " + ex.Message); return ""; }
     }
     // Kodi built-in command via its local EventServer (UDP 9777).
     static void Builtin(string cmd) {
@@ -590,7 +674,7 @@ static class KodiLauncher {
 static class YouTubeLauncher {
     public static int Run() {
         var tv = TvDisplay.Find();
-        if (tv == null) { Cfg.Log("youtube launcher: no TV display, not opening"); return 1; }
+        if (tv == null) { Cfg.Warn("youtube launcher: no TV display, not opening"); return 1; }
         var b = tv.Bounds;
         var profile = Profile;
         // YouTube only serves its TV ("leanback") interface to TV devices, so identify as one.
@@ -598,17 +682,19 @@ static class YouTubeLauncher {
         var args = string.Format("--user-data-dir=\"{0}\" --kiosk --window-position={1},{2} --window-size={3},{4} --user-agent=\"{5}\" " +
             "--no-first-run --no-default-browser-check --autoplay-policy=no-user-gesture-required --disable-features=Translate https://www.youtube.com/tv",
             profile, b.X, b.Y, b.Width, b.Height, ua);
-        Process.Start(new ProcessStartInfo(Cfg.ChromeExe, args) { UseShellExecute = false });
+        try { Process.Start(new ProcessStartInfo(Cfg.ChromeExe, args) { UseShellExecute = false }); }
+        catch (Exception ex) { Cfg.Error("youtube launcher: cannot start " + Cfg.ChromeExe + ": " + ex.Message); return 1; }
         // chrome.exe hands off to a new browser process and exits; find the real browser process
         // (the one using our profile without a --type= switch) and wait on that.
         Process browser = null;
         for (int i = 0; i < 40 && browser == null; i++) { Thread.Sleep(500); browser = FindBrowser(profile); }
-        if (browser == null) { Cfg.Log("youtube launcher: browser process not found"); return 1; }
+        if (browser == null) { Cfg.Error("youtube launcher: no Chrome browser process with the yt-profile appeared within 20 s"); return 1; }
+        Cfg.Hold(browser);
         Directory.CreateDirectory(Cfg.Dir); File.WriteAllText(Cfg.YouTubePidFile, browser.Id.ToString());
         Cfg.Log("youtube launcher: chrome browser pid " + browser.Id);
-        try { browser.WaitForExit(); } catch { }
+        try { browser.WaitForExit(); } catch (Exception ex) { Cfg.Warn("youtube launcher: cannot wait for Chrome: " + ex.Message); }
         try { File.Delete(Cfg.YouTubePidFile); } catch { }
-        Cfg.Log("youtube launcher: closed");
+        Cfg.Log("youtube launcher: closed (" + Cfg.ExitOf(browser) + ")");
         return 0;
     }
     public static readonly string Profile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "yt-profile");
@@ -618,7 +704,7 @@ static class YouTubeLauncher {
                 foreach (System.Management.ManagementObject o in q.Get())
                     if (TvSeat.IsYouTubeBrowser(o["CommandLine"] as string, profile))
                         return Process.GetProcessById(Convert.ToInt32(o["ProcessId"]));
-        } catch { }
+        } catch (Exception ex) { Cfg.Warn("youtube launcher: process query failed: " + ex.Message); }
         return null;
     }
     // Whether a PID is the YouTube browser, by its command line. Cached per process (PID and start
@@ -678,16 +764,66 @@ class Helper : Form {
         tray = new NotifyIcon { Icon = ico, Text = tip, ContextMenuStrip = menu, Visible = true };
         CreateHandle(); // the form is never shown, so create its window explicitly for the hotkey
         timer = new System.Windows.Forms.Timer { Interval = 1000 };
-        timer.Tick += (s, e) => { try { Tick(); } catch (Exception ex) { Cfg.Log("tick error: " + ex.Message); } };
+        timer.Tick += (s, e) => { try { Tick(); } catch (Exception ex) { Fault("tick", ex); } };
         timer.Start();
         mouseTimer = new System.Windows.Forms.Timer { Interval = 100 };
-        mouseTimer.Tick += (s, e) => { try { KeepMouseOnDesk(); RememberDeskWindow(); } catch { } };
+        mouseTimer.Tick += (s, e) => { try { KeepMouseOnDesk(); RememberDeskWindow(); } catch (Exception ex) { Fault("mouse", ex); } };
         mouseTimer.Start();
         keyHookProc = OnKey;   // held in a field: a collected delegate would crash the hook
         keyHook = N.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, keyHookProc, N.GetModuleHandle(null), 0);
-        if (keyHook == IntPtr.Zero) Cfg.Log("keyboard hook unavailable: the keyboard will not return focus to the desk");
-        Cfg.Log("helper started");
-        EnsurePlutoRealAds();
+        if (keyHook == IntPtr.Zero) Cfg.Error("keyboard hook unavailable (error " + Marshal.GetLastWin32Error() + "): the keyboard will not return focus to the desk");
+        // Every focus change, whoever caused it: without it, "the game lost focus" has no culprit.
+        fgHookProc = OnForeground;
+        fgHook = N.SetWinEventHook(3 /*EVENT_SYSTEM_FOREGROUND*/, 3, IntPtr.Zero, fgHookProc, 0, 0, 0x2 /*OUTOFCONTEXT|SKIPOWNPROCESS*/);
+        if (fgHook == IntPtr.Zero) Cfg.Warn("focus-change hook unavailable: focus changes will not be logged");
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplays;
+        Microsoft.Win32.SystemEvents.PowerModeChanged += OnPower;
+        Microsoft.Win32.SystemEvents.SessionSwitch += OnSession;
+        string built = "?";
+        try { built = File.GetLastWriteTime(Application.ExecutablePath).ToString("yyyy-MM-dd HH:mm"); } catch { }
+        Cfg.Log("helper started: " + Application.ExecutablePath + " built " + built + "; displays " + DisplayList());
+        EnsureAddonPatches();
+    }
+
+    // An exception from a timer: full stack the first time, then at most once a minute per
+    // place, so a fault that repeats every tick cannot flood the log or hide everything else.
+    readonly Dictionary<string, DateTime> faultLogged = new Dictionary<string, DateTime>();
+    readonly Dictionary<string, int> faultCount = new Dictionary<string, int>();
+    void Fault(string where, Exception ex) {
+        int n; faultCount.TryGetValue(where, out n); faultCount[where] = ++n;
+        DateTime last;
+        if (faultLogged.TryGetValue(where, out last) && (DateTime.Now - last).TotalMinutes < 1) return;
+        faultLogged[where] = DateTime.Now;
+        Cfg.Error(where + " error (" + n + "x so far): " + ex);
+    }
+
+    static string DisplayList() {
+        try {
+            return string.Join(" | ", Screen.AllScreens.Select(x => x.DeviceName + " " + N.MonitorId(x.DeviceName) + " " + x.Bounds + (x.Primary ? " primary" : "")));
+        } catch (Exception ex) { return "unreadable: " + ex.Message; }
+    }
+    void OnDisplays(object s, EventArgs e) { Cfg.Log("displays changed: " + DisplayList()); }
+    void OnPower(object s, Microsoft.Win32.PowerModeChangedEventArgs e) { Cfg.Log("power: " + e.Mode); }
+    void OnSession(object s, Microsoft.Win32.SessionSwitchEventArgs e) { Cfg.Log("session: " + e.Reason); }
+
+    IntPtr fgHook = IntPtr.Zero; N.WinEventProc fgHookProc;   // held in a field, like keyHookProc
+    void OnForeground(IntPtr hook, uint ev, IntPtr h, int obj, int child, uint thread, uint time) {
+        try { Cfg.Log("focus -> " + Describe(h)); } catch { }
+    }
+
+    // A window as the log names it: process, pid, screen. The title only for windows on the TV;
+    // desk titles (documents, browser tabs) are the person's business, not the log's.
+    string Describe(IntPtr h) {
+        if (h == IntPtr.Zero) return "no window";
+        uint pid; N.GetWindowThreadProcessId(h, out pid);
+        string name = "?";
+        try { using (var p = Process.GetProcessById((int)pid)) name = p.ProcessName; } catch { }
+        var r = N.Rect(h); var c = new Point(r.X + r.Width / 2, r.Y + r.Height / 2);
+        bool onTv = !tvBounds.IsEmpty && tvBounds.Contains(c);
+        string where = onTv ? "tv" : Desk().Bounds.Contains(c) ? "desk" : "off-screen";
+        string title = "";
+        if (onTv) { var sb = new StringBuilder(256); N.GetWindowText(h, sb, 256); title = " \"" + sb + "\""; }
+        return name + "[" + pid + "]" + title + " on " + where;
     }
 
     // The tray icon is drawn here, a plain TV set, so the helper ships no image file and never
@@ -715,40 +851,30 @@ class Helper : Form {
         }
     }
 
-    // The SlyGuy Pluto add-on asks for streams without server-side ads, which makes Pluto fill
-    // every ad break with its logo. Ask for real ads instead; re-applied after add-on updates.
-    static void EnsurePlutoRealAds() {
-        try {
-            var f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                @"Kodi\addons\slyguy.pluto.tv.provider\resources\lib\plugin.py");
-            if (!File.Exists(f)) return;
-            var t = File.ReadAllText(f);
-            if (t.Contains("'serverSideAds': 'false'")) {
-                File.WriteAllText(f, t.Replace("'serverSideAds': 'false'", "'serverSideAds': 'true'"));
-                Cfg.Log("Pluto add-on: re-enabled real ads");
-            }
-        } catch (Exception ex) { Cfg.Log("Pluto ads patch failed: " + ex.Message); }
+    // Fixes to third-party Kodi add-ons, re-applied on every start because an add-on update
+    // overwrites them. Each is independent: a missing add-on skips only its own patch.
+    static void EnsureAddonPatches() {
         // SlyGuy's bandwidth cap only accepts whole Mbit/s; allow decimals (cap is 0.7 = Pluto's lowest stream).
-        try {
-            var g = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                @"Kodi\addons\script.module.slyguy\resources\modules\slyguy\gui.py");
-            if (!File.Exists(g)) return;
-            var t = File.ReadAllText(g);
-            const string from = "'max_bandwidth': settings.getInt('max_bandwidth', 0),";
-            const string to = "'max_bandwidth': float(settings.get('max_bandwidth', 0) or 0),";
-            if (t.Contains(from)) { File.WriteAllText(g, t.Replace(from, to)); Cfg.Log("SlyGuy: re-enabled decimal bandwidth cap"); }
-        } catch (Exception ex) { Cfg.Log("SlyGuy bandwidth patch failed: " + ex.Message); }
+        PatchAddon("SlyGuy decimal bandwidth cap", @"script.module.slyguy\resources\modules\slyguy\gui.py",
+            "'max_bandwidth': settings.getInt('max_bandwidth', 0),",
+            "'max_bandwidth': float(settings.get('max_bandwidth', 0) or 0),");
         // CBC's server stalls requests that identify as Python, so the CBC Radio add-on hangs forever.
         // Make it identify as a browser (and give up after 20 s instead of never).
+        PatchAddon("CBC Radio browser identity", @"plugin.audio.cbcradio\now_playing.py",
+            "response = urllib.request.urlopen(url)",
+            "response = urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=20)");
+    }
+
+    static void PatchAddon(string name, string relative, string from, string to) {
         try {
-            var c = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                @"Kodi\addons\plugin.audio.cbcradio\now_playing.py");
-            if (!File.Exists(c)) return;
-            var t = File.ReadAllText(c);
-            const string from = "response = urllib.request.urlopen(url)";
-            const string to = "response = urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'}), timeout=20)";
-            if (t.Contains(from)) { File.WriteAllText(c, t.Replace(from, to)); Cfg.Log("CBC Radio: re-applied browser identity fix"); }
-        } catch (Exception ex) { Cfg.Log("CBC Radio patch failed: " + ex.Message); }
+            var f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), @"Kodi\addons", relative);
+            if (!File.Exists(f)) { Cfg.Log("add-on patch " + name + ": add-on not installed"); return; }
+            var t = File.ReadAllText(f);
+            if (t.Contains(from)) { File.WriteAllText(f, t.Replace(from, to)); Cfg.Log("add-on patch " + name + ": re-applied"); }
+            else if (t.Contains(to)) Cfg.Log("add-on patch " + name + ": already in place");
+            // Neither text: the add-on changed under the patch, which now does nothing.
+            else Cfg.Error("add-on patch " + name + ": " + relative + " no longer contains the code it patches; update the patch");
+        } catch (Exception ex) { Cfg.Error("add-on patch " + name + " failed: " + ex.Message); }
     }
 
     // Confine the cursor to the desk display. A focused game clips the cursor to its own window,
@@ -808,7 +934,8 @@ class Helper : Form {
         var target = lastDeskWindow;
         if (target == IntPtr.Zero || !N.IsWindow(target) || !N.IsWindowVisible(target)) target = N.GetShellWindow();
         if (target == IntPtr.Zero) return;
-        Cfg.Log(N.Focus(target) ? "keyboard on desk -> focus back to the desk" : "keyboard on desk -> Windows refused the focus change");
+        if (N.Focus(target)) Cfg.Log("keyboard on desk -> focus back to the desk");
+        else Cfg.Warn("keyboard on desk -> Windows refused the focus change (focus stays with " + Describe(N.GetForegroundWindow()) + ")");
     }
 
     // Controller press -> focus whatever is on the TV, because Steam only sends the controller
@@ -835,7 +962,7 @@ class Helper : Form {
         if (target != IntPtr.Zero && N.GetForegroundWindow() != target) {
             var what = target == game ? "game" : target == kodi ? "TV app" : "Big Picture";
             if (N.Focus(target)) Cfg.Log("controller press -> focused " + what);
-            else { lastPadFocus = DateTime.MinValue; Cfg.Log("controller press -> Windows refused to focus " + what); }
+            else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> Windows refused to focus " + what + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
         }
     }
 
@@ -861,12 +988,13 @@ class Helper : Form {
     protected override void SetVisibleCore(bool v) { base.SetVisibleCore(false); }
     protected override void OnHandleCreated(EventArgs e) {
         base.OnHandleCreated(e);
-        if (!N.RegisterHotKey(Handle, HOTKEY, 0x1 | 0x2 | 0x4000 /*Alt|Ctrl|NoRepeat*/, (uint)Keys.T)) Cfg.Log("hotkey Ctrl+Alt+T unavailable");
+        if (!N.RegisterHotKey(Handle, HOTKEY, 0x1 | 0x2 | 0x4000 /*Alt|Ctrl|NoRepeat*/, (uint)Keys.T)) Cfg.Warn("hotkey Ctrl+Alt+T unavailable (another program holds it)");
         // Gamepads + joysticks, delivered even when we are in the background (RIDEV_INPUTSINK).
         var devs = new[] {
             new N.RAWINPUTDEVICE { UsagePage = 1, Usage = 5, Flags = 0x100, Target = Handle },
             new N.RAWINPUTDEVICE { UsagePage = 1, Usage = 4, Flags = 0x100, Target = Handle } };
-        if (!N.RegisterRawInputDevices(devs, 2, (uint)Marshal.SizeOf(typeof(N.RAWINPUTDEVICE)))) Cfg.Log("raw input registration failed");
+        if (!N.RegisterRawInputDevices(devs, 2, (uint)Marshal.SizeOf(typeof(N.RAWINPUTDEVICE))))
+            Cfg.Error("raw input registration failed (error " + Marshal.GetLastWin32Error() + "): a controller press will not focus the TV");
     }
     protected override void WndProc(ref Message m) {
         if (m.Msg == 0x312 && m.WParam.ToInt32() == HOTKEY) SetTarget(gameScreen == "tv" ? "desk" : "tv", true);
@@ -887,13 +1015,19 @@ class Helper : Form {
                         }
                     } finally { Marshal.FreeHGlobal(buf); }
                 }
-            } catch (Exception ex) { Cfg.Log("raw input error: " + ex.Message); }
+            } catch (Exception ex) { Fault("raw input", ex); }
         }
         base.WndProc(ref m);
     }
     protected override void OnFormClosed(FormClosedEventArgs e) {
         N.UnregisterHotKey(Handle, HOTKEY);
         if (keyHook != IntPtr.Zero) N.UnhookWindowsHookEx(keyHook);
+        if (fgHook != IntPtr.Zero) N.UnhookWinEvent(fgHook);
+        // SystemEvents are static: a handler left on them outlives the form.
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplays;
+        Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPower;
+        Microsoft.Win32.SystemEvents.SessionSwitch -= OnSession;
+        Cfg.Log("helper closing (Exit from the tray menu)");
         var all = new N.RECT { L = -32000, T = -32000, R = 32000, B = 32000 }; N.ClipCursor(ref all);
         tray.Visible = false; tray.Dispose(); base.OnFormClosed(e);
         Application.Exit();
@@ -1002,13 +1136,33 @@ class Helper : Form {
 
     // Apps that live on the TV (Kodi, YouTube): keep them there, focus them when they start, never let
     // Big Picture cover them, and bring Big Picture back when they close.
-    class TvApp { public string Name; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending, CoveredLogged; }
+    // Proc is held from the moment its window appears, so its exit code can be read once it is
+    // gone: that is what tells a crash from a close. CrashLog is the app's own log, kept on a crash.
+    class TvApp { public string Name, CrashLog; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending, CoveredLogged; public Process Proc; }
     readonly List<TvApp> tvApps = new List<TvApp> {
         // Kodi runs windowed (its own monitor switching is unreliable): strip the border and make its
         // drawing area exactly cover the TV, so it renders full-screen there.
-        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true },
+        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, CrashLog = Cfg.KodiLog },
         new TvApp { Name = "YouTube", Find = YouTubeWindow, Borderless = false },
     };
+
+    // How a TV app's window went away, logged once. A crash is an ERROR, with the app's log kept.
+    void TvAppGone(TvApp a) {
+        var p = a.Proc; a.Proc = null;
+        string how = "process unknown";
+        bool crashed = false;
+        if (p != null) {
+            try {
+                if (p.WaitForExit(2000)) { how = Cfg.ExitOf(p); crashed = Cfg.IsCrash(p.ExitCode); }
+                else how = "window gone but process " + p.Id + " still running";
+            } catch (Exception ex) { how = "exit code unknown: " + ex.Message; }
+            p.Dispose();
+        }
+        if (!crashed) { Cfg.Log(a.Name + " closed (" + how + ")"); return; }
+        var kept = a.CrashLog == null ? "" : Cfg.KeepCrashLog(a.Name.ToLowerInvariant(), a.CrashLog);
+        Cfg.Error(a.Name + " crashed (" + how + ")" + (kept != "" ? "; its log is kept at " + kept : "")
+            + "; the game " + (Game.Running().Length > 0 ? "was" : "was not") + " running");
+    }
     // One TV app at a time, like a TV. A second one started from its tile closes the first:
     // left open, the first sits behind the second with its tile still "running", and the
     // controller (which goes to Kodi before YouTube) never reaches the second. Apps already
@@ -1032,13 +1186,21 @@ class Helper : Form {
         if (h == IntPtr.Zero) {
             if (a.Running) {
                 a.Running = false;
-                if (TvAppWindow() == IntPtr.Zero) { bpRestartAt = DateTime.Now.AddSeconds(3); Cfg.Log(a.Name + " closed -> restarting Big Picture"); }
+                TvAppGone(a);
+                // Not while the game runs: Steam hides Big Picture then, and reopening it would
+                // cover the game. The game's own exit restarts it.
+                if (Game.Running().Length > 0) Cfg.Log(a.Name + " gone -> Big Picture left alone, the game is running");
+                else if (TvAppWindow() == IntPtr.Zero) { bpRestartAt = DateTime.Now.AddSeconds(3); Cfg.Log(a.Name + " gone -> restarting Big Picture"); }
             }
             return;
         }
         if (!a.Running) {
             a.Running = true; focusBpUntil = DateTime.MinValue; bpRestartAt = DateTime.MinValue; bpReopenAt = DateTime.MinValue;
-            a.FocusPending = true; Cfg.Log(a.Name + " started");
+            a.FocusPending = true;
+            uint pid; N.GetWindowThreadProcessId(h, out pid);
+            try { a.Proc = Process.GetProcessById((int)pid); } catch { a.Proc = null; }
+            bool held = Cfg.Hold(a.Proc);
+            Cfg.Log(a.Name + " started (pid " + pid + (held ? "" : ", exit code will be unknown") + ")");
         }
         if (N.IsIconic(h)) N.ShowWindow(h, 9);
         if (a.Borderless) {
@@ -1057,7 +1219,10 @@ class Helper : Form {
         // Just started: put it in front once (Steam can leave Big Picture over it).
         if (a.FocusPending) {
             a.FocusPending = false;
-            if (!FocusIsOnDesk()) { N.Focus(h); Cfg.Log("focused newly started " + a.Name); }
+            if (!FocusIsOnDesk()) {
+                if (N.Focus(h)) Cfg.Log("focused newly started " + a.Name);
+                else Cfg.Warn("Windows refused to focus newly started " + a.Name + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")");
+            } else Cfg.Log(a.Name + " started while the desk has focus -> left unfocused");
         }
         // Nothing (e.g. Big Picture) may sit on top of it on the TV - except Steam's menu while you use it.
         // Raised without taking focus: this only runs while focus is on the desk, and taking it
@@ -1097,18 +1262,19 @@ class Helper : Form {
             // YouTube is open on the TV: Big Picture would come up over it, and its tile's
             // "Resume" cannot bring it back. That app's own close restarts Big Picture.
             if (gamePid != -1) {
+                Cfg.Log("game process " + gamePid + " gone");
                 if (TvAppWindow() == IntPtr.Zero) { bpRestartAt = DateTime.Now.AddSeconds(3); Cfg.Log("game closed -> restarting Big Picture"); }
                 else Cfg.Log("game closed -> Big Picture left alone, a TV app is open");
             }
             gamePid = -1; gameHwnd = IntPtr.Zero;
             if (bpRestartAt != DateTime.MinValue && DateTime.Now >= bpRestartAt) {
                 bpRestartAt = DateTime.MinValue;
-                Process.Start(new ProcessStartInfo("steam://close/bigpicture") { UseShellExecute = true });
+                Steam("close/bigpicture");
                 bpReopenAt = DateTime.Now.AddSeconds(4);
             }
             if (bpReopenAt != DateTime.MinValue && DateTime.Now >= bpReopenAt) {
                 bpReopenAt = DateTime.MinValue; lastBpOpen = DateTime.Now; focusBpUntil = DateTime.Now.AddSeconds(15);
-                Process.Start(new ProcessStartInfo("steam://open/bigpicture") { UseShellExecute = true });
+                Steam("open/bigpicture");
             }
         }
         else {
@@ -1141,6 +1307,12 @@ class Helper : Form {
         SendDeskWindowsHome(tv);
         var web = new HashSet<uint>(Process.GetProcessesByName("steamwebhelper").Select(p => (uint)p.Id));
         var bp = N.WindowsOf(web.Contains, t => t == "Steam Big Picture Mode");
+        bool steamUp = Process.GetProcessesByName("steam").Length > 0;
+        if (steamUp != steamSeen) { steamSeen = steamUp; Cfg.Log("Steam " + (steamUp ? "is running" : "is not running")); }
+        if ((bp.Count > 0) != bpSeen) {
+            bpSeen = bp.Count > 0;
+            Cfg.Log("Big Picture window " + (bpSeen ? "present" : "gone") + (Game.Running().Length > 0 ? " (game running)" : ""));
+        }
         if (bp.Count > 0) {
             bpMissingSince = DateTime.MinValue;
             foreach (var h in bp)
@@ -1149,19 +1321,28 @@ class Helper : Form {
             if (tvAppRunning) focusBpUntil = DateTime.MinValue;   // never pull Big Picture over a running game/TV
             // Not while the desk has focus: the keyboard there would follow it to the TV.
             if (focusBpUntil > DateTime.Now && N.GetForegroundWindow() != bp[0] && !FocusIsOnDesk()) {
-                N.Focus(bp[0]); focusBpUntil = DateTime.MinValue; Cfg.Log("focused restarted Big Picture");
+                focusBpUntil = DateTime.MinValue;
+                if (N.Focus(bp[0])) Cfg.Log("focused restarted Big Picture");
+                else Cfg.Warn("Windows refused to focus restarted Big Picture (focus stays with " + Describe(N.GetForegroundWindow()) + ")");
             }
         } else if (TvAppWindow() != IntPtr.Zero || Game.Running().Length > 0) {
             // Steam hides Big Picture while a game runs - that's not "closed", so don't reopen it
             // (a reopened Big Picture would cover the game with a black screen).
             bpMissingSince = DateTime.MinValue;
-        } else if (keepBp && Process.GetProcessesByName("steam").Length > 0) {
+        } else if (keepBp && steamUp) {
             if (bpMissingSince == DateTime.MinValue) bpMissingSince = DateTime.Now;
             if ((DateTime.Now - bpMissingSince).TotalSeconds > 10 && (DateTime.Now - lastBpOpen).TotalSeconds > 60) {
                 lastBpOpen = DateTime.Now;
                 Cfg.Log("Big Picture not open -> opening");
-                Process.Start(new ProcessStartInfo("steam://open/bigpicture") { UseShellExecute = true });
+                Steam("open/bigpicture");
             }
         }
+    }
+    bool bpSeen = false, steamSeen = false;
+
+    static void Steam(string command) {
+        Cfg.Log("steam://" + command);
+        try { Process.Start(new ProcessStartInfo("steam://" + command) { UseShellExecute = true }); }
+        catch (Exception ex) { Cfg.Error("steam://" + command + " failed: " + ex.Message); }
     }
 }
