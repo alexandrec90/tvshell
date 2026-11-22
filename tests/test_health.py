@@ -177,6 +177,23 @@ def test_kodi_context_takes_the_lines_before_the_crash_from_any_copy(tmp_path):
     ]
 
 
+def test_kodi_logs_lists_both_logs_then_the_saved_crash_copies(tmp_path):
+    kodi_dir, log_dir = tmp_path / "kodi", tmp_path / "tvshell"
+    (log_dir / "crashes").mkdir(parents=True)
+    for name in ("kodi-2026-11-21b.log", "kodi-2026-11-20.log", "other.log"):
+        (log_dir / "crashes" / name).write_text("")
+    assert health.kodi_logs(kodi_dir, log_dir) == [
+        kodi_dir / "kodi.log",
+        kodi_dir / "kodi.old.log",
+        log_dir / "crashes" / "kodi-2026-11-20.log",
+        log_dir / "crashes" / "kodi-2026-11-21b.log",
+    ]
+    assert health.kodi_logs(kodi_dir, tmp_path / "none") == [
+        kodi_dir / "kodi.log",
+        kodi_dir / "kodi.old.log",
+    ]
+
+
 def test_crash_findings_attach_kodi_context_only_to_kodi(tmp_path):
     log = tmp_path / "kodi.log"
     log.write_text("2026-11-21 11:35:40.000 T:1 info <general>: just before\n")

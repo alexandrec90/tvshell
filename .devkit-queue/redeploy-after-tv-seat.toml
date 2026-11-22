@@ -1,0 +1,5 @@
+# The installed helper was deployed from this branch before it merged, replacing a build
+# from another branch. Once merged, install main's build on the TV PC so what runs is main.
+when = "merged"
+on = "DESKTOP-ML5F3PJ"
+run = "python -m tvshell.deploy"
