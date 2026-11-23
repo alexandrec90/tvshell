@@ -81,10 +81,22 @@ def test_verdict_skip_fails_only_under_scheduler():
 def test_pytest_argv_selects_marker_after_addopts():
     argv = e2e.pytest_argv(Path("r.xml"), ["tests/test_deploy.py"])
     assert argv[:3] == ["uv", "run", "--frozen"]
+    # pytest lives in the `dev` extra: a bare `uv run` in a tree with no `.venv` built one
+    # without it, and the run ended `No module named pytest`.
+    assert {"--all-extras", "--all-groups"} <= set(argv[: argv.index("python")])
     assert argv[argv.index("local") - 1] == "-m"
     assert argv.index("local") > argv.index("pytest")
     assert "tests/test_deploy.py" in argv and "tests" not in argv
     assert argv[-1] == "--junitxml=r.xml"
+
+
+def test_a_tree_with_no_venv_runs_without_the_sessions_no_sync(tmp_path):
+    """A devkit session's `UV_NO_SYNC` reached a run in a tree with no `.venv`: `uv run`
+    made an empty one, installed nothing, and the run ended `No module named pytest`."""
+    session = {e2e.NO_SYNC: "1", "KEPT": "x"}
+    assert e2e.run_env(session, tmp_path) == {"KEPT": "x", "PYTHONUTF8": "1"}
+    (tmp_path / ".venv").mkdir()
+    assert e2e.run_env(session, tmp_path)[e2e.NO_SYNC] == "1", "a borrowed .venv is left alone"
 
 
 def test_main_runs_pytest_and_reports(tmp_path, monkeypatch, capsys):
