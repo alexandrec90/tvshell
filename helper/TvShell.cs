@@ -705,6 +705,14 @@ static class KodiLauncher {
     }
     static bool IsPlaying() { return Rpc("Player.GetActivePlayers", "{}").Contains("playerid"); }
 
+    // Stops Kodi's video player, if one is playing; true when it did. Audio (radio) is left alone.
+    internal static bool StopVideo() {
+        var m = System.Text.RegularExpressions.Regex.Match(Rpc("Player.GetActivePlayers", "{}"),
+            "\\{[^{}]*\"playerid\":(\\d+)[^{}]*\"type\":\"video\"[^{}]*\\}");
+        if (!m.Success) return false;
+        return Rpc("Player.Stop", "{\"playerid\":" + m.Groups[1].Value + "}").Contains("\"OK\"");
+    }
+
     // Most recently watched TV channel (or the first channel if none watched yet); 0 if channels aren't loaded.
     static int LastChannel() {
         var r = Rpc("PVR.GetChannels", "{\"channelgroupid\":\"alltv\",\"properties\":[\"lastplayed\"]}");
@@ -1305,11 +1313,17 @@ class Helper : Form {
     // Proc is held from the moment its window appears, so its exit code can be read once it is
     // gone: that is what tells a crash from a close. CrashLog is the app's own log, kept on a crash;
     // ExitedLine is the last line the app logs once it has finished shutting down.
-    class TvApp { public string Name, CrashLog, ExitedLine; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending, CoveredLogged; public Process Proc; }
+    // StopVideoWhenCovered: see KeepTvApp; CoveredSince and StopChecking are its state.
+    class TvApp {
+        public string Name, CrashLog, ExitedLine; public Func<IntPtr> Find; public bool Borderless, StopVideoWhenCovered;
+        public bool Running, FocusPending, CoveredLogged; public Process Proc;
+        public DateTime CoveredSince = DateTime.MinValue; public volatile bool StopChecking;
+    }
+    static readonly TimeSpan CoveredVideoLimit = TimeSpan.FromSeconds(60);
     readonly List<TvApp> tvApps = new List<TvApp> {
         // Kodi runs windowed (its own monitor switching is unreliable): strip the border and make its
         // drawing area exactly cover the TV, so it renders full-screen there.
-        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, CrashLog = Cfg.KodiLog, ExitedLine = Cfg.KodiExitedLine },
+        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, StopVideoWhenCovered = true, CrashLog = Cfg.KodiLog, ExitedLine = Cfg.KodiExitedLine },
         // BackWhenTV's app opens borderless full-screen on the primary display: same treatment.
         new TvApp { Name = "BackWhenTV app", Find = BackWhenApp.Window, Borderless = true },
     }.Concat(WebApp.All.Select(a => new TvApp { Name = a.Name, Find = a.Window, Borderless = false })).ToList();
@@ -1408,6 +1422,27 @@ class Helper : Form {
             bool raised = N.GetAncestor(N.WindowFromPoint(centre), 2) == h;
             if (raised || !a.CoveredLogged) Cfg.Log(a.Name + " was covered -> " + (raised ? "brought to front" : "stays covered until the controller is used"));
             a.CoveredLogged = !raised;
+        }
+        // Kodi 21.3 playing video behind another window (the game, Big Picture) stops presenting
+        // frames ("OutputPicture - timeout waiting for buffer" in its log) and minutes later crashes
+        // in its video output. So video left covered for a minute is stopped; radio plays on. The
+        // RPC runs off this timer's thread: it can wait seconds on a busy Kodi.
+        if (a.StopVideoWhenCovered) {
+            bool covered = N.GetAncestor(N.WindowFromPoint(centre), 2) != h;
+            if (!covered) a.CoveredSince = DateTime.MinValue;
+            else if (a.CoveredSince == DateTime.MinValue) a.CoveredSince = DateTime.Now;
+            else if (DateTime.Now - a.CoveredSince >= CoveredVideoLimit && !a.StopChecking) {
+                a.CoveredSince = DateTime.Now;   // still covered: checked again a minute later
+                a.StopChecking = true;
+                var app = a;
+                ThreadPool.QueueUserWorkItem(_ => {
+                    try {
+                        if (KodiLauncher.StopVideo())
+                            Cfg.Log(app.Name + " covered for " + (int)CoveredVideoLimit.TotalSeconds + " s while playing video -> stopped it, Kodi crashes rendering video it cannot show");
+                    } catch (Exception ex) { Cfg.Warn("stopping covered " + app.Name + " video failed: " + ex.Message); }
+                    finally { app.StopChecking = false; }
+                });
+            }
         }
     }
 
