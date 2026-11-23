@@ -1,9 +1,12 @@
+import datetime as dt
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from tvshell import deploy
+from tvshell import deploy, verify
 
 
 @pytest.mark.parametrize(
@@ -159,41 +162,207 @@ def test_main_build_only(monkeypatch, capsys):
     assert built == [deploy.REPO / "logs" / "TvShell.exe"]
 
 
+class FakeDeploy:
+    """`deploy.main` with the compiler, the tests, the processes and the live checks faked.
+
+    `calls` is what it did to the machine, in order; `verified` is what it asked the live
+    checks for.
+    """
+
+    def __init__(self, monkeypatch, tmp_path, green=True, checks=(), running=()):
+        self.calls: list = []
+        self.verified: list[dict] = []
+        self.install_dir = tmp_path / "install"
+        self.install_dir.mkdir()
+        monkeypatch.setattr(deploy, "REPO", tmp_path / "repo")
+
+        def build(out: Path) -> None:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"new")
+
+        def run_checks(install_dir, drill, since):
+            self.verified.append({"install_dir": install_dir, "drill": drill, "since": since})
+            return list(checks)
+
+        monkeypatch.setattr(deploy, "build", build)
+
+        def start_tests(built: Path) -> str:
+            self.calls.append("tests started")
+            return "the test run"
+
+        def tests_passed(running: str) -> bool:
+            assert running == "the test run"
+            self.calls.append("tests awaited")
+            return green
+
+        monkeypatch.setattr(deploy, "start_tests", start_tests)
+        monkeypatch.setattr(deploy, "tests_passed", tests_passed)
+        monkeypatch.setattr(deploy, "running_tvshell", lambda: list(running))
+        monkeypatch.setattr(deploy.subprocess, "run", lambda argv, **_k: self.calls.append(argv))
+        monkeypatch.setattr(deploy.subprocess, "Popen", lambda argv, **_k: self.calls.append(argv))
+        monkeypatch.setattr(deploy.verify, "run", run_checks)
+        monkeypatch.setattr(
+            deploy.verify, "write_artifact", lambda _checks: tmp_path / "verify.json"
+        )
+
+    def main(self, *args: str) -> int:
+        return deploy.main(["--install-dir", str(self.install_dir), *args])
+
+    @property
+    def installed(self) -> Path:
+        return self.install_dir / "TvShell.exe"
+
+
 def test_main_installs_and_restarts_only_the_helper(monkeypatch, tmp_path):
-    calls = []
-    monkeypatch.setattr(deploy, "build", lambda out: out.write_bytes(b"new"))
-    monkeypatch.setattr(
-        deploy,
-        "running_tvshell",
-        lambda: [
+    fake = FakeDeploy(
+        monkeypatch,
+        tmp_path,
+        running=[
             {"ProcessId": 11, "CommandLine": "TvShell.exe"},
             {"ProcessId": 12, "CommandLine": "TvShell.exe kodi tv"},
         ],
     )
-    monkeypatch.setattr(deploy.subprocess, "run", lambda argv, **_k: calls.append(argv))
-    monkeypatch.setattr(deploy.subprocess, "Popen", lambda argv, **_k: calls.append(argv))
-    assert deploy.main(["--install-dir", str(tmp_path)]) == 0
-    assert calls == [["taskkill", "/PID", "11", "/F"], [str(tmp_path / "TvShell.exe")]]
-    assert (tmp_path / "TvShell.exe").read_bytes() == b"new"
+    assert fake.main() == 0
+    # The install never waits for the tests: they start, the helper is swapped and
+    # restarted, and only then is their verdict read.
+    assert fake.calls == [
+        "tests started",
+        ["taskkill", "/PID", "11", "/F"],
+        [str(fake.installed)],
+        "tests awaited",
+    ]
+    assert fake.installed.read_bytes() == b"new"
+    assert not (fake.install_dir / "TvShell.new.exe").exists()
+
+
+def test_main_installs_even_when_the_helper_tests_fail(monkeypatch, tmp_path, capsys):
+    # Red tests are a report, not a refusal: the fix is on the TV and the exit code says
+    # there is something to repair.
+    fake = FakeDeploy(
+        monkeypatch,
+        tmp_path,
+        green=False,
+        running=[{"ProcessId": 11, "CommandLine": "TvShell.exe"}],
+    )
+    fake.installed.write_bytes(b"old")
+    assert fake.main() == 1
+    assert fake.installed.read_bytes() == b"new"
+    assert [str(fake.installed)] in fake.calls
+    assert len(fake.verified) == 1
+    out = capsys.readouterr().out
+    assert "tests: FAILED on the build that is now installed" in out
+    assert "deploy-tests.log" in out
+
+
+def test_main_runs_the_tests_on_every_deploy():
+    # The tests block nothing, so nothing needs a flag to skip them, and none exists:
+    # every deploy says what it broke.
+    with pytest.raises(SystemExit):
+        deploy.main(["--skip-tests"])
+    parser_flags = {"--build", "--install-dir", "--no-drill"}
+    source = Path(deploy.__file__).read_text(encoding="utf-8")
+    assert set(re.findall(r'add_argument\(\s*"(--[\w-]+)"', source)) == parser_flags
+
+
+def test_main_checks_the_installed_helper_at_work_and_drills_the_displays(monkeypatch, tmp_path):
+    fake = FakeDeploy(monkeypatch, tmp_path, checks=[verify.Check("helper", True, "running")])
+    before = dt.datetime.now().replace(microsecond=0)
+    assert fake.main() == 0
+    (asked,) = fake.verified
+    assert asked["install_dir"] == fake.install_dir
+    assert asked["drill"] is True
+    # Only what is logged from the new helper's start on counts.
+    assert before <= asked["since"] <= dt.datetime.now()
+
+
+def test_main_no_drill_leaves_only_the_drill_out(monkeypatch, tmp_path):
+    fake = FakeDeploy(monkeypatch, tmp_path)
+    assert fake.main("--no-drill") == 0
+    assert [asked["drill"] for asked in fake.verified] == [False]
+
+
+def test_main_is_red_when_the_installed_helper_fails_a_live_check(monkeypatch, tmp_path, capsys):
+    checks = [
+        verify.Check("helper", True, "running"),
+        verify.Check("displays", False, "the TV is the primary display"),
+    ]
+    fake = FakeDeploy(monkeypatch, tmp_path, checks=checks)
+    assert fake.main() == 1
+    assert fake.installed.read_bytes() == b"new"
+    out = capsys.readouterr().out
+    assert "FAIL displays: the TV is the primary display" in out
+    assert "verify: FAILED (displays)" in out
 
 
 def test_main_restarts_the_old_helper_when_the_swap_fails(monkeypatch, tmp_path):
-    (tmp_path / "TvShell.exe").write_bytes(b"old")
-    calls = []
-    monkeypatch.setattr(deploy, "build", lambda out: out.write_bytes(b"new"))
-    monkeypatch.setattr(
-        deploy, "running_tvshell", lambda: [{"ProcessId": 11, "CommandLine": "TvShell.exe"}]
+    fake = FakeDeploy(
+        monkeypatch, tmp_path, running=[{"ProcessId": 11, "CommandLine": "TvShell.exe"}]
     )
-    monkeypatch.setattr(deploy.subprocess, "run", lambda argv, **_k: calls.append(argv))
-    monkeypatch.setattr(deploy.subprocess, "Popen", lambda argv, **_k: calls.append(argv))
+    fake.installed.write_bytes(b"old")
 
     def fail(*_a):
         raise OSError("disk full")
 
     monkeypatch.setattr(deploy, "install", fail)
     with pytest.raises(OSError, match="disk full"):
-        deploy.main(["--install-dir", str(tmp_path)])
-    assert calls == [["taskkill", "/PID", "11", "/F"], [str(tmp_path / "TvShell.exe")]]
+        fake.main()
+    assert fake.calls == [
+        "tests started",
+        ["taskkill", "/PID", "11", "/F"],
+        [str(fake.installed)],
+    ]
+
+
+def test_tests_command_selects_the_helper_tests_after_addopts(tmp_path):
+    argv = deploy.tests_command(tmp_path / "r.xml")
+    assert argv[:3] == [sys.executable, "-m", "pytest"]
+    assert argv[argv.index("helper") - 1] == "-m"
+    assert argv.index("helper") > argv.index("pytest")
+    assert str(deploy.REPO / "tests") in argv
+    assert argv[-1] == f"--junitxml={tmp_path / 'r.xml'}"
+
+
+def test_start_tests_judges_the_built_exe_without_waiting(monkeypatch, tmp_path):
+    monkeypatch.setattr(deploy, "REPO", tmp_path)
+    seen = {}
+
+    def popen(argv, **kwargs):
+        seen.update(kwargs, argv=argv)
+        kwargs["stdout"].write(b"1 failed\n")
+        return "running"
+
+    monkeypatch.setattr(deploy.subprocess, "Popen", popen)
+    assert deploy.start_tests(tmp_path / "built" / "TvShell.exe") == "running"
+    assert seen["argv"] == deploy.tests_command(tmp_path / "logs" / "deploy-tests.xml")
+    assert seen["env"][deploy.TEST_EXE_ENV] == str(tmp_path / "built" / "TvShell.exe")
+    assert seen["cwd"] == tmp_path
+    assert seen["stderr"] == subprocess.STDOUT
+    assert (tmp_path / "logs" / "deploy-tests.log").read_bytes() == b"1 failed\n"
+
+
+class FakeRun:
+    def __init__(self, code=0, hangs=False):
+        self.code, self.hangs, self.killed = code, hangs, False
+
+    def wait(self, timeout):
+        if self.hangs:
+            raise subprocess.TimeoutExpired("pytest", timeout)
+        return self.code
+
+    def kill(self):
+        self.killed = True
+
+
+@pytest.mark.parametrize(("code", "passed"), [(0, True), (1, False), (5, False)])
+def test_tests_passed_reads_the_exit_code(code, passed):
+    # 5 is pytest's "collected nothing": a run of no test is not a pass.
+    assert deploy.tests_passed(FakeRun(code)) is passed
+
+
+def test_tests_passed_calls_a_hung_run_red_and_ends_it():
+    run = FakeRun(hangs=True)
+    assert deploy.tests_passed(run, timeout=1) is False
+    assert run.killed
 
 
 def test_build_reports_compiler_failure(monkeypatch, tmp_path):

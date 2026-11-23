@@ -1,0 +1,22 @@
+when = "merged"
+on = "any"
+agent = """
+The `helper` job in `.github/workflows/pr-gate.yml` (Windows runner: compiles
+`helper/TvShell.cs` with .NET Framework's csc.exe and runs `pytest tests -m helper`) was
+added without ever having run. This project delivers `direct` (`.devkit.toml`): changes
+merge first and that job is what catches a broken helper afterwards, so it has to work.
+
+Look at the PR Gate run on the default branch for the commit that added this file
+(`gh run list --workflow "PR Gate" --branch main --limit 5`, then `gh run view <id>`).
+
+- If the `Helper (C#) tests` job is green: tick the matching item under "Known gaps" in
+  `TODO.md` (move it to the Archive section) and ship that.
+- If it is red or did not start: read its log (`gh run view <id> --log-failed`), fix the
+  cause in the workflow or the tests, and ship the fix. Likely causes: `csc.exe` not at
+  `Framework64/v4.0.30319` on the runner (`tvshell/deploy.py::find_csc`), or a test that
+  needs this PC's desktop or install directory and should not carry the `helper` marker
+  alone. Do not delete or skip a failing test to make it green.
+
+Finished means: a green `Helper (C#) tests` job on the default branch, and the TODO item
+archived.
+"""

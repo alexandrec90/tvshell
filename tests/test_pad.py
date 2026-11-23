@@ -14,12 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from tvshell import deploy
-
 PRESS, NONE, BAD = 1, 0, 254
 CENTRED = "000880" * 2  # both 12-bit sticks at 2048
 
 pytestmark = pytest.mark.local
+
+# What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
+COVERS = ("Pad.Buttons", "Pad.Pressed", "Pad.Hex", "Pad.Cli", "mode:pad-press")
 
 
 def full(right: int = 0, shared: int = 0, left: int = 0, sticks: str = CENTRED) -> str:
@@ -30,18 +31,6 @@ def full(right: int = 0, shared: int = 0, left: int = 0, sticks: str = CENTRED) 
 def simple(b1: int = 0, b2: int = 0, hat: int = 8) -> str:
     """A 0x3F report: id, two button bytes, the d-pad direction, then sticks."""
     return f"3F{b1:02X}{b2:02X}{hat:02X}" + "00" * 8
-
-
-@pytest.fixture(scope="module")
-def exe(tmp_path_factory) -> Path:
-    if deploy.find_csc() is None:
-        pytest.fail("the .NET Framework C# compiler is not on this PC")
-    out = tmp_path_factory.mktemp("tvshell")
-    (out / "logs").mkdir()
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(deploy, "REPO", out)  # the build log goes under REPO/logs
-        deploy.build(out / "TvShell.exe")
-    return out / "TvShell.exe"
 
 
 def pressed(exe: Path, *args: str) -> int:

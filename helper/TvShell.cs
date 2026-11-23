@@ -168,13 +168,25 @@ static class TvDisplay {
         if (wanted.Length > 0) {
             for (int i = 0; i < ids.Length; i++) {
                 if (primary[i]) continue;
-                var segs = (ids[i] ?? "").Split('#', '\\');
-                if (wanted.Any(w => segs.Any(s => string.Equals(s, w, StringComparison.OrdinalIgnoreCase)))) return i;
+                if (Matches(ids[i], wanted)) return i;
             }
             return -1;
         }
         if (ids.Length != 2) return -1;
         return primary[0] == primary[1] ? -1 : (primary[0] ? 1 : 0);
+    }
+
+    // Whether a monitor interface path carries one of the wanted codes as a whole segment.
+    public static bool Matches(string id, string[] wanted) {
+        var segs = (id ?? "").Split('#', '\\');
+        return wanted.Any(w => segs.Any(s => string.Equals(s, w, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    // Every display as the log names it: output, monitor path, bounds, and which is primary.
+    public static string List() {
+        try {
+            return string.Join(" | ", Screen.AllScreens.Select(x => x.DeviceName + " " + N.MonitorId(x.DeviceName) + " " + x.Bounds + (x.Primary ? " primary" : "")));
+        } catch (Exception ex) { return "unreadable: " + ex.Message; }
     }
 
     public static Screen Find() {
@@ -197,6 +209,182 @@ static class TvDisplay {
         var rest = args.Skip(2).ToArray();
         int r = Pick(rest.Select(a => a.TrimEnd('*')).ToArray(), rest.Select(a => a.EndsWith("*")).ToArray(), wanted);
         return r < 0 ? 255 : r;
+    }
+}
+
+// The desk display is the primary one: the taskbar, the sign-in screen and every new window open
+// on the primary display, and the TV cannot be seen from the desk. Windows keeps one layout per
+// set of monitors, and the TV is a different monitor to it depending on whether it was on at
+// boot (it then reports its own identity rather than its adapter's), so a layout with the TV as
+// primary can come back on any boot. The helper then makes the other display primary, with the
+// TV to its right - but only when nothing is guessed: tv.cfg names the TV, exactly two displays
+// are connected, exactly one of them is the TV, and the TV is the primary one.
+static class DeskPrimary {
+    static readonly List<DateTime> switched = new List<DateTime>();
+    static bool gaveUp;
+    const int MaxSwitches = 3;          // within Window; more than that and something else is
+    const int WindowMinutes = 10;       // setting it back, which the helper does not fight
+
+    // Pure choice: the index of the display to make primary, or -1 to leave the displays alone.
+    public static int Plan(string[] ids, bool[] primary, string[] wanted) {
+        if (wanted.Length == 0 || ids.Length != 2) return -1;
+        bool tv0 = TvDisplay.Matches(ids[0], wanted), tv1 = TvDisplay.Matches(ids[1], wanted);
+        if (tv0 == tv1) return -1;
+        int tv = tv0 ? 0 : 1;
+        return primary[tv] && !primary[1 - tv] ? 1 - tv : -1;
+    }
+
+    static int PlanNow(out Screen[] all, out string[] ids) {
+        all = Screen.AllScreens;
+        ids = all.Select(s => N.MonitorId(s.DeviceName)).ToArray();
+        return Plan(ids, all.Select(s => s.Primary).ToArray(), TvDisplay.Wanted);
+    }
+
+    // Makes the desk display primary when Plan says so. 0: nothing to do, 2: switched, 1: could not.
+    public static int Ensure() {
+        Screen[] all; string[] ids;
+        int desk = PlanNow(out all, out ids);
+        if (desk < 0) { gaveUp = false; return 0; }
+        switched.RemoveAll(t => (DateTime.Now - t).TotalMinutes > WindowMinutes);
+        if (switched.Count >= MaxSwitches) {
+            if (!gaveUp) Cfg.Error("the TV is the primary display again after the helper made the desk primary " + MaxSwitches + " times in " + WindowMinutes + " minutes; something else keeps setting it back, so the displays are left alone: " + TvDisplay.List());
+            gaveUp = true;
+            return 1;
+        }
+        switched.Add(DateTime.Now);
+        Cfg.Warn("the TV is the primary display (" + TvDisplay.List() + ") -> making " + all[desk].DeviceName + " primary");
+        string problem = Apply(all[desk].DeviceName, all[1 - desk].DeviceName);
+        if (problem != null) { Cfg.Error("could not make the desk display primary: " + problem); return 1; }
+        Cfg.Log("the desk display " + all[desk].DeviceName + " is primary, the TV is to its right");
+        return 2;
+    }
+
+    // The layout as Windows' display-configuration API holds it: the primary display is the one
+    // at 0,0, so the desk goes there and the TV to its right, in one change. null when it took.
+    //
+    // Not ChangeDisplaySettingsEx: Windows can start the plasma in a mode (852x480) that is not in
+    // its own mode list, and that API then answers "bad mode" (-2) to any change that names the
+    // TV, even one that moves nothing. SetDisplayConfig is asked to keep every mode as it is first,
+    // and only when that is refused to pick the nearest ones (SDC_ALLOW_CHANGES); a TV whose
+    // resolution changed that way is a WARN.
+    //
+    // The two arrays are read as bytes at the documented offsets rather than as structs:
+    // DISPLAYCONFIG_MODE_INFO is 64 bytes - infoType at 0 (1 = a source, i.e. a desktop area),
+    // id at 4, adapterId at 8, then for a source: width 16, height 20, position x 28, y 32.
+    const int PathSize = 72, ModeSize = 64;
+    static string Apply(string desk, string tv) {
+        uint np, nm; byte[] paths, modes;
+        string problem = Query(out np, out paths, out nm, out modes);
+        if (problem != null) return problem;
+        int deskAt = SourceMode(modes, nm, desk), tvAt = SourceMode(modes, nm, tv);
+        if (deskAt < 0 || tvAt < 0) return "the display configuration does not list " + (deskAt < 0 ? desk : tv);
+        int deskWidth = (int)BitConverter.ToUInt32(modes, deskAt + 16);
+        string tvSize = Size(modes, tvAt);
+        BitConverter.GetBytes(0).CopyTo(modes, deskAt + 28); BitConverter.GetBytes(0).CopyTo(modes, deskAt + 32);
+        BitConverter.GetBytes(deskWidth).CopyTo(modes, tvAt + 28); BitConverter.GetBytes(0).CopyTo(modes, tvAt + 32);
+        const uint UseSupplied = 0x20, ApplyNow = 0x80, SaveToDatabase = 0x200, AllowChanges = 0x400;
+        int exact = N.SetDisplayConfig(np, paths, nm, modes, UseSupplied | ApplyNow | SaveToDatabase);
+        if (exact != 0) {
+            int r = N.SetDisplayConfig(np, paths, nm, modes, UseSupplied | ApplyNow | SaveToDatabase | AllowChanges);
+            if (r != 0) return "SetDisplayConfig answered " + exact + ", then " + r + " when allowed to adjust the modes (0 is success)";
+        }
+        // Windows saying yes is not the display being there: read it back.
+        problem = Query(out np, out paths, out nm, out modes);
+        if (problem != null) return "the change was accepted but cannot be read back: " + problem;
+        deskAt = SourceMode(modes, nm, desk); tvAt = SourceMode(modes, nm, tv);
+        if (deskAt < 0 || !AtOrigin(modes, deskAt)) return "Windows accepted the change but " + desk + " is not at 0,0";
+        if (tvAt >= 0 && Size(modes, tvAt) != tvSize)
+            Cfg.Warn("Windows could not keep the mode of " + tv + " (SetDisplayConfig answered " + exact + "): it was " + tvSize + " and is now " + Size(modes, tvAt));
+        return null;
+    }
+    static string Size(byte[] modes, int at) { return BitConverter.ToUInt32(modes, at + 16) + "x" + BitConverter.ToUInt32(modes, at + 20); }
+    static bool AtOrigin(byte[] modes, int at) { return BitConverter.ToInt32(modes, at + 28) == 0 && BitConverter.ToInt32(modes, at + 32) == 0; }
+    // Whether a display output is the primary one right now, asked of Windows afresh.
+    static bool IsPrimary(string gdiName) {
+        uint np, nm; byte[] paths, modes;
+        if (Query(out np, out paths, out nm, out modes) != null) return false;
+        int at = SourceMode(modes, nm, gdiName);
+        return at >= 0 && AtOrigin(modes, at);
+    }
+
+    // `TvShell.exe desk-primary drill`: the fault itself, on this PC's real displays. Makes the
+    // TV the primary display, as a bad boot does, and gives the running helper 15 seconds to
+    // undo it. 0: the helper did. 1: it did not (the drill then puts the desk back itself).
+    // 3, 4, 5: nothing was drilled - the TV is already primary, tv.cfg names no TV among exactly
+    // two displays, or Windows refused the fault. Both displays flicker; run it from the deploy.
+    static int Drill() {
+        Screen[] all; string[] ids;
+        if (PlanNow(out all, out ids) >= 0) { Console.WriteLine("the TV is already the primary display: nothing to drill"); return 3; }
+        int tv = TvDisplay.Wanted.Length > 0 && all.Length == 2 ? TvDisplay.Pick(ids, all.Select(s => s.Primary).ToArray(), TvDisplay.Wanted) : -1;
+        if (tv < 0) { Console.WriteLine("tv.cfg names no TV among exactly two displays: nothing to drill"); return 4; }
+        string desk = all[1 - tv].DeviceName, tvName = all[tv].DeviceName;
+        Cfg.Log("drill: making the TV (" + tvName + ") the primary display; the running helper has 15 s to undo it");
+        string problem = Apply(tvName, desk);
+        if (problem != null) { Cfg.Warn("drill: could not make the TV primary: " + problem); Console.WriteLine("could not make the TV primary: " + problem); return 5; }
+        var started = DateTime.Now;
+        while ((DateTime.Now - started).TotalSeconds < 15) {
+            Thread.Sleep(250);
+            if (!IsPrimary(desk)) continue;
+            var took = (DateTime.Now - started).TotalSeconds.ToString("0.0");
+            Cfg.Log("drill: the helper made the desk primary again after " + took + " s");
+            Console.WriteLine("the helper made the desk primary again after " + took + " s");
+            return 0;
+        }
+        problem = Apply(desk, tvName);
+        Cfg.Error("drill: the helper did not make the desk display primary within 15 s; the drill put it back itself" + (problem == null ? "" : ", which failed: " + problem));
+        Console.WriteLine("the helper did not make the desk primary within 15 s");
+        return 1;
+    }
+
+    static string Query(out uint np, out byte[] paths, out uint nm, out byte[] modes) {
+        paths = modes = new byte[0]; np = nm = 0;
+        const uint OnlyActivePaths = 2;
+        int r = N.GetDisplayConfigBufferSizes(OnlyActivePaths, out np, out nm);
+        if (r != 0) return "GetDisplayConfigBufferSizes answered " + r;
+        paths = new byte[np * PathSize]; modes = new byte[nm * ModeSize];
+        r = N.QueryDisplayConfig(OnlyActivePaths, ref np, paths, ref nm, modes, IntPtr.Zero);
+        return r == 0 ? null : "QueryDisplayConfig answered " + r;
+    }
+
+    // The byte offset of the source mode whose desktop area is the display output `gdiName`
+    // (\\.\DISPLAY1), or -1. DISPLAYCONFIG_SOURCE_DEVICE_NAME is 84 bytes: type (1) at 0, size
+    // at 4, adapterId at 8, id at 16, then the name as 32 UTF-16 characters at 20.
+    static int SourceMode(byte[] modes, uint count, string gdiName) {
+        for (int i = 0; i < count; i++) {
+            int o = i * ModeSize;
+            if (BitConverter.ToUInt32(modes, o) != 1) continue;
+            var packet = new byte[84];
+            BitConverter.GetBytes(1u).CopyTo(packet, 0); BitConverter.GetBytes(84u).CopyTo(packet, 4);
+            Array.Copy(modes, o + 8, packet, 8, 8); Array.Copy(modes, o + 4, packet, 16, 4);
+            if (N.DisplayConfigGetDeviceInfo(packet) != 0) continue;
+            var name = Encoding.Unicode.GetString(packet, 20, 64);
+            int end = name.IndexOf('\0');
+            if (string.Equals(end < 0 ? name : name.Substring(0, end), gdiName, StringComparison.OrdinalIgnoreCase)) return o;
+        }
+        return -1;
+    }
+
+    // `TvShell.exe plan-primary <wanted,codes|-> <id>[*] ...` (a trailing * marks the primary):
+    // exits with Plan's index, or 255 for "leave them alone". Lets the tests exercise Plan
+    // without displays.
+    public static int PlanCli(string[] args) {
+        if (args.Length < 2) return 254;
+        var wanted = args[1] == "-" ? new string[0] : args[1].Split(',');
+        var rest = args.Skip(2).ToArray();
+        int r = Plan(rest.Select(a => a.TrimEnd('*')).ToArray(), rest.Select(a => a.EndsWith("*")).ToArray(), wanted);
+        return r < 0 ? 255 : r;
+    }
+
+    // `TvShell.exe desk-primary check`: this PC's displays, read only. Prints them and exits 0
+    // when the desk is primary (or there is nothing to decide), 3 when the TV is.
+    // `TvShell.exe desk-primary`: Ensure's answer (0 nothing to do, 2 switched, 1 could not).
+    // `TvShell.exe desk-primary drill`: see Drill. Anything else exits 254.
+    public static int Cli(string[] args) {
+        if (args.Length == 2 && args[1] == "drill") return Drill();
+        if (args.Length > 2 || (args.Length == 2 && args[1] != "check")) return 254;
+        Console.WriteLine(TvDisplay.List());
+        if (args.Length == 2) { Screen[] all; string[] ids; return PlanNow(out all, out ids) >= 0 ? 3 : 0; }
+        return Ensure();
     }
 }
 
@@ -302,6 +490,60 @@ static class DeskKeys {
 // differently, so a report is only ever compared with the previous one of the same kind: a mode
 // switch is a new baseline, not a press. Without that, every focus change Steam answered with a
 // mode switch read as a press, and focus bounced between the desk and the TV.
+// Steam's window in front of the game or TV app with nothing on it. Closing Steam's menu, or
+// a second tile ending, leaves Big Picture focused and black over what was running; its
+// "Resume" does not bring that back, and the controller is never taken from a focused Steam
+// window (that would fight the menu while it is in use). So the screen is read: a Steam
+// window that has shown nothing but black for a couple of seconds is not a menu in use.
+static class BlankSteam {
+    const int Cols = 32, Rows = 18, Black = 8;
+    public const double Seconds = 2;
+
+    // Pure: give the screen back to what is running on the TV?
+    public static bool Plan(bool running, bool steamInFront, bool dark, double seconds) {
+        return running && steamInFront && dark && seconds >= Seconds;
+    }
+    // Pure: every sampled pixel (0xRRGGBB) is black. No sample is not black: nothing was read.
+    public static bool Dark(int[] rgb) {
+        if (rgb.Length == 0) return false;
+        foreach (int c in rgb)
+            if (((c >> 16) & 255) > Black || ((c >> 8) & 255) > Black || (c & 255) > Black) return false;
+        return true;
+    }
+    // A grid of pixels from the TV, without the bottom strip: Steam keeps its button hints there
+    // on the black screen too.
+    public static int[] Sample(Rectangle tv) {
+        int w = tv.Width, h = tv.Height - tv.Height / 8;
+        var px = new List<int>();
+        try {
+            using (var b = new Bitmap(w, h)) {
+                using (var g = Graphics.FromImage(b)) g.CopyFromScreen(tv.X, tv.Y, 0, 0, b.Size);
+                for (int y = 0; y < Rows; y++)
+                    for (int x = 0; x < Cols; x++)
+                        px.Add(b.GetPixel((2 * x + 1) * w / (2 * Cols), (2 * y + 1) * h / (2 * Rows)).ToArgb() & 0xFFFFFF);
+            }
+        } catch (Exception) { return new int[0]; }   // a locked or secure desktop cannot be read
+        return px.ToArray();
+    }
+    // blank-steam <running 0|1> <steam in front 0|1> <seconds> <rrggbb>... -> 1 give it back, 0 leave it
+    // blank-steam sample <x> <y> <w> <h> -> 0 with every pixel of that screen area black, 3 with
+    // something on it, 4 when the screen could not be read
+    public static int Cli(string[] args) {
+        if (args.Length == 6 && args[1] == "sample") {
+            int[] r;
+            try { r = args.Skip(2).Select(int.Parse).ToArray(); } catch (Exception) { return 254; }
+            var px = Sample(new Rectangle(r[0], r[1], r[2], r[3]));
+            return px.Length == 0 ? 4 : Dark(px) ? 0 : 3;
+        }
+        if (args.Length < 4) return 254;
+        double seconds;
+        if (!double.TryParse(args[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out seconds)) return 254;
+        int[] rgb;
+        try { rgb = args.Skip(4).Select(a => Convert.ToInt32(a, 16)).ToArray(); } catch (Exception) { return 254; }
+        return Plan(args[1] == "1", args[2] == "1", Dark(rgb), seconds) ? 1 : 0;
+    }
+}
+
 static class Pad {
     // Report id plus three button bytes, Home and Capture masked off (Home opens Steam's menu), or
     // null for a report that carries no buttons this reads.
@@ -478,6 +720,11 @@ static class N {
         var dd = new DISPLAY_DEVICE(); dd.cb = Marshal.SizeOf(typeof(DISPLAY_DEVICE));
         return EnumDisplayDevices(output, 0, ref dd, 1 /*EDD_GET_DEVICE_INTERFACE_NAME*/) ? (dd.DeviceID ?? "") : "";
     }
+    // Windows' display-configuration API; DeskPrimary reads the arrays as bytes.
+    [DllImport("user32.dll")] public static extern int GetDisplayConfigBufferSizes(uint flags, out uint paths, out uint modes);
+    [DllImport("user32.dll")] public static extern int QueryDisplayConfig(uint flags, ref uint nPaths, byte[] paths, ref uint nModes, byte[] modes, IntPtr topology);
+    [DllImport("user32.dll")] public static extern int SetDisplayConfig(uint nPaths, byte[] paths, uint nModes, byte[] modes, uint flags);
+    [DllImport("user32.dll")] public static extern int DisplayConfigGetDeviceInfo(byte[] packet);
     [StructLayout(LayoutKind.Sequential)] public struct RAWINPUTDEVICE { public ushort UsagePage, Usage; public uint Flags; public IntPtr Target; }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
@@ -541,12 +788,16 @@ static class Program {
         } catch (Exception ex) { Cfg.Error("cannot read steam-gameid.txt: " + ex.Message); }
         Game.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "game.cfg"));
         if (mode == "pick-tv") return TvDisplay.Cli(args);
+        if (mode == "plan-primary") return DeskPrimary.PlanCli(args);
+        if (mode == "blank-steam") return BlankSteam.Cli(args);
         if (mode == "pad-keys") return PadKeys.Cli(args);
         if (mode == "desk-key") return DeskKeys.Cli(args);
         if (mode == "close-store-launcher") return Launcher.CloseStoreLauncherCli();
+        if (mode == "wait-out-kodi") return KodiLauncher.WaitOutCli(args);
         if (mode == "pad-press") return Pad.Cli(args);
         if (mode == "tv-seat") return TvSeat.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
+        if (mode == "desk-primary") return DeskPrimary.Cli(args);
         if (mode == "launch") return Launcher.Run();
         if (mode == "kodi") return KodiLauncher.Run(args.Length > 1 ? args[1].ToLowerInvariant() : "tv");
         if (mode == "backwhen-app") return BackWhenApp.Run();
@@ -554,6 +805,9 @@ static class Program {
         if (webApp != null) return WebAppLauncher.Run(webApp);
         if (mode == "launch-desk") return Launcher.ViaSteam("desk");
         if (mode == "launch-tv") return Launcher.ViaSteam("tv");
+        // Only no argument at all is the helper: a mistyped or not-yet-existing mode must not
+        // start a second tray helper from wherever that exe happens to be.
+        if (mode != "") { Cfg.Warn("unknown mode '" + mode + "', nothing started"); return 253; }
         bool created;
         using (var mtx = new Mutex(true, @"Local\TvShellHelper", out created)) {
             if (!created) { Cfg.Log("helper already running, this one exits"); return 0; }
@@ -691,10 +945,41 @@ static class KodiLauncher {
         } else Cfg.Warn("kodi launcher: unknown section '" + target + "'");
         // The helper is the one witness of how Kodi ends (crash log, ERROR); this is the tile's record.
         if (started) {
-            try { kodi.WaitForExit(); } catch (Exception ex) { Cfg.Warn("kodi launcher: cannot wait for Kodi: " + ex.Message); }
-            Cfg.Log("kodi launcher: Kodi exited (" + Cfg.ExitOf(kodi) + "), the tile ends");
+            if (WaitOut(kodi, Cfg.KodiLog, HungAfterExitSeconds)) Cfg.Log("kodi launcher: Kodi ended by the launcher, the tile ends");
+            else Cfg.Log("kodi launcher: Kodi exited (" + Cfg.ExitOf(kodi) + "), the tile ends");
         }
         return 0;
+    }
+
+    // Kodi 21.3 can hang in its last teardown after logging that it has finished (once for 13 hours,
+    // crashing at the end), and Steam counts the tile as running for as long as it lingers. So once
+    // Kodi's log has ended with its exited line for `grace` seconds and the process is still there,
+    // the launcher ends it: everything was saved before that line. True when the launcher ended it.
+    const int HungAfterExitSeconds = 30;
+    public static bool WaitOut(Process kodi, string log, int grace) {
+        DateTime? exitedSince = null;
+        try {
+            while (!kodi.WaitForExit(1000)) {
+                if (!Cfg.LogEndsWith(log, Cfg.KodiExitedLine)) { exitedSince = null; continue; }
+                if (exitedSince == null) exitedSince = DateTime.Now;
+                if ((DateTime.Now - exitedSince.Value).TotalSeconds < grace) continue;
+                Cfg.Warn("kodi launcher: Kodi finished shutting down " + grace + " s ago but process " + kodi.Id + " is still running -> ending it");
+                try { kodi.Kill(); } catch (Exception ex) { Cfg.Error("kodi launcher: cannot end hung Kodi pid " + kodi.Id + ": " + ex.Message); }
+                if (!kodi.WaitForExit(10000)) Cfg.Error("kodi launcher: hung Kodi pid " + kodi.Id + " did not end within 10 s");
+                return true;
+            }
+        } catch (Exception ex) { Cfg.Warn("kodi launcher: cannot wait for Kodi: " + ex.Message); }
+        return false;
+    }
+
+    // `TvShell.exe wait-out-kodi <pid> <log> <grace seconds>`: runs WaitOut on that process, exits 2
+    // when it ended it and 0 when the process went by itself. Lets the tests drive it with a
+    // stand-in process and log.
+    public static int WaitOutCli(string[] args) {
+        if (args.Length < 4) { Cfg.Error("wait-out-kodi: usage wait-out-kodi <pid> <log> <grace seconds>"); return 1; }
+        Process p;
+        try { p = Process.GetProcessById(int.Parse(args[1])); } catch (Exception ex) { Cfg.Warn("wait-out-kodi: no process " + args[1] + ": " + ex.Message); return 0; }
+        return WaitOut(p, args[2], int.Parse(args[3])) ? 2 : 0;
     }
     static bool WaitForKodi(int seconds) {
         for (int i = 0; i < seconds * 2; i++) {
@@ -959,11 +1244,7 @@ class Helper : Form {
         Cfg.Error(where + " error (" + n + "x so far): " + ex);
     }
 
-    static string DisplayList() {
-        try {
-            return string.Join(" | ", Screen.AllScreens.Select(x => x.DeviceName + " " + N.MonitorId(x.DeviceName) + " " + x.Bounds + (x.Primary ? " primary" : "")));
-        } catch (Exception ex) { return "unreadable: " + ex.Message; }
-    }
+    static string DisplayList() { return TvDisplay.List(); }
     void OnDisplays(object s, EventArgs e) { Cfg.Log("displays changed: " + DisplayList()); }
     void OnPower(object s, Microsoft.Win32.PowerModeChangedEventArgs e) { Cfg.Log("power: " + e.Mode); }
     void OnSession(object s, Microsoft.Win32.SessionSwitchEventArgs e) { Cfg.Log("session: " + e.Reason); }
@@ -1425,7 +1706,26 @@ class Helper : Form {
         else if (activate) N.SetForegroundWindow(h);
     }
 
+    // Steam's window focused and black over the game or TV app -> focus that instead (BlankSteam).
+    DateTime blankSince = DateTime.MinValue;
+    void RetakeFromBlankSteam(Screen tv) {
+        var game = GameWindow();
+        bool onTv = game != IntPtr.Zero && gameScreen == "tv";
+        IntPtr target = onTv ? game : TvAppWindow();
+        string what = onTv ? "game" : "TV app";
+        bool running = target != IntPtr.Zero;
+        bool front = running && SteamInFront() && FocusIsOnTv();
+        bool dark = front && BlankSteam.Dark(BlankSteam.Sample(tv.Bounds));
+        if (!dark) { blankSince = DateTime.MinValue; return; }
+        if (blankSince == DateTime.MinValue) blankSince = DateTime.Now;
+        if (!BlankSteam.Plan(running, front, dark, (DateTime.Now - blankSince).TotalSeconds)) return;
+        blankSince = DateTime.MinValue;
+        if (N.Focus(target)) Cfg.Log("Steam's window was black over the " + what + " -> focused the " + what);
+        else Cfg.Warn("Steam's window is black over the " + what + " -> Windows refused to focus the " + what);
+    }
+
     void Tick() {
+        DeskPrimary.Ensure();  // before anything is placed: the TV as primary display means "no TV"
         var tv = Tv();
         tvBounds = tv == null ? Rectangle.Empty : tv.Bounds;
 
@@ -1478,6 +1778,7 @@ class Helper : Form {
 
         // --- Big Picture ---
         if (tv == null) return;
+        RetakeFromBlankSteam(tv);
         KeepTvApps(tv);
         SendDeskWindowsHome(tv);
         var web = new HashSet<uint>(Process.GetProcessesByName("steamwebhelper").Select(p => (uint)p.Id));

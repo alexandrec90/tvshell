@@ -19,20 +19,25 @@ from tvshell import deploy
 
 pytestmark = pytest.mark.local
 
+# What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
+COVERS = (
+    "Launcher.CloseStoreLauncher",
+    "Launcher.CloseStoreLauncherCli",
+    "Game.Load",
+    "mode:close-store-launcher",
+)
+
 FAKE = "TvShellTestStoreLauncher"
 SLEEPER = "class P { static void Main() { System.Threading.Thread.Sleep(120000); } }\n"
 
 
 @pytest.fixture(scope="module")
-def built(tmp_path_factory) -> Path:
+def built(exe) -> Path:
+    """The helper's directory, with a stand-in store launcher compiled beside it."""
     csc = deploy.find_csc()
     if csc is None:
         pytest.fail("the .NET Framework C# compiler is not on this PC")
-    out = tmp_path_factory.mktemp("tvshell")
-    (out / "logs").mkdir()
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(deploy, "REPO", out)  # the build log goes under REPO/logs
-        deploy.build(out / "TvShell.exe")
+    out = exe.parent
     src = out / "sleeper.cs"
     src.write_text(SLEEPER, encoding="utf-8")
     done = subprocess.run(  # noqa: S603 - the local compiler on our own source

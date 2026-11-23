@@ -15,6 +15,9 @@ import pytest
 
 pytestmark = pytest.mark.local
 
+# What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
+COVERS = ("PadKeys.Buttons", "PadKeys.Keys", "PadKeys.Cli", "mode:pad-keys")
+
 UP, DOWN, LEFT, RIGHT, A, B, MINUS = 1, 2, 4, 8, 16, 32, 64
 ENTER, ESC, ARROW_UP, ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT = "0D", "1B", "26", "28", "25", "27"
 ALT_F4 = "12+73"

@@ -12,12 +12,18 @@
 
 ## Known gaps
 
-- [ ] **The C# helper has no unit tests**, only the compile check in the `local` tier.
-      The pure parts are testable once extracted from the Win32 calls: which window the
-      controller should focus (`OnPadReport`'s priority), which screen a game launch
-      chose (mode file vs process start time), Switch Pro report decoding, the
-      launcher's last-channel pick from `PVR.GetChannels`. A second, tiny C# test exe
-      built by the same `csc.exe` in the `local` tier would avoid needing the .NET SDK.
+- [ ] **Most of the C# helper still has no test**: `tests/helper-untested.txt` is the
+      exact list, and it only shrinks. The pure parts are testable once extracted from
+      the Win32 calls and given a mode of the exe, as `TvDisplay.Pick` was: which window
+      the controller should focus (`OnPadReport`'s priority), which screen a game launch
+      chose (mode file vs process start time), the launcher's last-channel pick from
+      `PVR.GetChannels`.
+- [ ] The helper's tests write to the real `%LOCALAPPDATA%/TvShell/tvshell.log`, so a
+      test that provokes an ERROR line puts one where the nightly health check reads.
+      Give the exe a log-directory override for tests.
+- [ ] The `helper` job in `pr-gate.yml` has not run yet: confirm on its first PR that
+      the Windows runner finds `csc.exe` and the job is green. It reports; it is never
+      made a required check (delivery is `direct`).
 - [ ] `helper/TvShell.cs` is one 700-line file; the structure ratchet only scans Python.
       Split it (helper, launchers, add-on patches, Win32 interop) when it next grows.
 - [ ] The add-on patches in the helper are string replacements that silently stop

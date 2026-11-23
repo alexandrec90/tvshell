@@ -40,7 +40,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from tvshell import deploy
+from tvshell import processes
 from tvshell.tiles import INSTALL_DIR
 
 REPO = Path(__file__).resolve().parent.parent
@@ -323,7 +323,7 @@ def check(
     kodi_dir: Path = KODI_DIR,
     installed: Path = INSTALL_DIR / "TvShell.exe",
     events: Callable[[_dt.datetime], list[Crash]] = read_crash_events,
-    helpers: Callable[[], list[int]] = lambda: deploy.helper_pids(deploy.running_tvshell()),
+    helpers: Callable[[], list[int]] = processes.running_helpers,
 ) -> Report:
     now = now or _dt.datetime.now().replace(microsecond=0)
     since = window_start(now, installed)

@@ -43,6 +43,16 @@ when there are exactly two. No match means no TV, and the helper moves nothing. 
 never guesses, because after a bad boot the driver can bring the displays up in a
 different layout.
 
+**The desk is the primary display, and the helper keeps it so** (`DeskPrimary`). The
+plasma reports its own identity when it is on at boot and its adapter's when it is not,
+Windows keeps a separate layout for each, and one of them had the TV as primary: taskbar
+and sign-in on a screen nobody at the desk can see. When the display `tv.cfg` names is
+the primary one of exactly two, the helper makes the other primary with the TV to its
+right. That is the one display setting it changes, and only then: with no `tv.cfg`, or
+any other number of displays, it leaves them alone. It uses `SetDisplayConfig`, because
+`ChangeDisplaySettingsEx` refuses any change naming the TV while Windows has it in a
+mode that is not in its mode list (852x480, the default it picked for the plasma).
+
 ## What the helper does, and why each part exists
 
 `helper/TvShell.cs` is one exe in several modes — no argument is the tray helper, an
@@ -70,6 +80,12 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
   game exits, and Big Picture is not restarted over a TV app still open on the TV.
 - **Steam hides Big Picture while a game runs**; that is not "closed". Reopening it then
   covers the game with a black screen.
+- **Steam's window can end up focused and black over the game or TV app**: after its menu
+  is closed, or when a second running tile ends. Its "Resume" does not bring the app
+  back, and a controller press is never taken from a focused Steam window (that would
+  fight the menu in use), so there was no way out from the couch. The helper reads the
+  TV's pixels (`BlankSteam`): a Steam window showing only black for two seconds is not
+  a menu in use, and focus goes back to what is running.
 - **Kodi cannot be placed on a monitor reliably**, so it runs windowed and the helper
   strips the border and fits the client area to the TV.
 - **The BackWhenTV app reads only the keyboard**, and Steam Input's keyboard bindings did
@@ -117,7 +133,9 @@ tier stays red over noise.
 ## Commands
 
 ```bash
-python -m tvshell.deploy                    # build helper/TvShell.cs and install it
+python -m tvshell.deploy                    # build the helper, install it at once, test and check it meanwhile
+python -m tvshell.deploy --no-drill         # the same without the display drill (someone is watching the TV)
+python -m tvshell.verify                    # is the TV side right, right now? read-only; --drill adds the drill
 python -m tvshell.steam_shortcuts --vdf <Steam userdata/<id>/config/shortcuts.vdf>   # Steam closed
 python -m tvshell.kodi install <addon id>   # Kodi running; answers its prompts
 python -m tvshell.slyguy set max_bandwidth 0.7   # Kodi closed
@@ -176,8 +194,35 @@ here is a fork that will disagree with it the first time either is edited.
 - **`local` marks what needs this PC**: compiling the helper with `csc.exe`, and the
   runtime health check against the real logs and event log. `addopts` deselects it;
   `scripts/e2e.py` runs it.
-- **The C# helper's logic has no unit tests**, only the compile check. It is
-  window-and-focus code against live Win32 state; see `TODO.md`.
+- **A helper decision is tested through a mode of the exe.** The decision is a pure
+  static function (`TvDisplay.Pick`, `DeskPrimary.Plan`), a mode runs it from the command
+  line (`pick-tv`, `plan-primary`), and a test passes cases to the built exe through the
+  `exe` fixture and reads the exit code. `tests/conftest.py` marks every such test
+  `helper`.
+- **No test holds a fix back; every deploy says what it broke.** The owner's rule: a
+  fix goes onto the TV at once, and testing and repairing happen beside it. So
+  `python -m tvshell.deploy` installs as soon as the helper compiles, with every
+  `helper` test running against that binary in the background, and delivery is
+  `direct` in `.devkit.toml` (merge first, checks after). Do not add a step that
+  refuses an install or a merge on a red test. After the install the deploy runs
+  `tvshell/verify.py` against the installed helper: it is running, the desk is the
+  primary display, no ERROR since it started, and the **display drill**, which makes
+  the TV primary for real and requires the running helper to restore the exact layout.
+  A red is exit 1 with the new helper in place, and the next thing to fix. The `helper`
+  job in `.github/workflows/pr-gate.yml` runs the same tests on a Windows runner.
+- **Every helper function has a test or is on a list that only shrinks.**
+  `tests/test_helper_coverage.py` reads `helper/TvShell.cs` in the plain suite: each
+  method and mode must be named in the `COVERS` tuple of a test module that runs the
+  exe, or be in `tests/helper-untested.txt`, whose length is pinned in that test. A new
+  function is never added to the list; it comes with a test. A `COVERS` entry is a
+  claim the check cannot judge, so make it true.
+- **A fix for something seen on the TV is not done until it has run against the real
+  fault.** The pure tests for `DeskPrimary` were green while Windows refused the change
+  on the actual plasma. Reproduce the fault on this PC, run the fix, and read the state
+  back with something other than the code under test.
+- **The helper's tests write to the real log** (`%LOCALAPPDATA%/TvShell/tvshell.log`):
+  a mode run from a test logs as its mode name. Read `role[pid]` before taking a line
+  for the TV's own.
 
 ## Guardrails
 

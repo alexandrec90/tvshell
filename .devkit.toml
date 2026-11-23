@@ -31,8 +31,10 @@ version = "3.12"
 # `merge-now`, nothing waits on a gate, and every check runs after the merge and repairs
 # what it finds.
 #
-# [delivery]
-# flow = "direct"
+# Direct here, by the owner's decision (2026-11-23): a fix for the TV is needed at once,
+# and a PR waiting on a gate was the bottleneck. Tests run beside the merge, not before it.
+[delivery]
+flow = "direct"
 
 # The Bash output cap `invoke-capped.py` applies. `enforce-capped-bash.py` (vendored,
 # not wired as a hook) quotes the same `max_bytes`, so one field feeds both.

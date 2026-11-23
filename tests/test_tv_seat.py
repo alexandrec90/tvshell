@@ -16,25 +16,21 @@ from pathlib import Path
 
 import pytest
 
-from tvshell import deploy
-
 PROFILE = r"C:\Users\someone\TvShell\yt-profile"
 STAYS, GOES = 1, 0
 BAD = 254
 
 pytestmark = pytest.mark.local
 
-
-@pytest.fixture(scope="module")
-def exe(tmp_path_factory) -> Path:
-    if deploy.find_csc() is None:
-        pytest.fail("the .NET Framework C# compiler is not on this PC")
-    out = tmp_path_factory.mktemp("tvshell")
-    (out / "logs").mkdir()
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(deploy, "REPO", out)  # the build log goes under REPO/logs
-        deploy.build(out / "TvShell.exe")
-    return out / "TvShell.exe"
+# What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
+COVERS = (
+    "TvSeat.BelongsOnTv",
+    "TvSeat.IsYouTubeBrowser",
+    "TvSeat.DeskRect",
+    "TvSeat.ParseRect",
+    "TvSeat.Cli",
+    "mode:tv-seat",
+)
 
 
 def seat(exe: Path, *args: str) -> subprocess.CompletedProcess[str]:

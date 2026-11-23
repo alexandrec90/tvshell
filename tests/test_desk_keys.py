@@ -15,24 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from tvshell import deploy
-
 IGNORE, PASS, HOLD = 0, 1, 2
 INJECTED, LOWER_IL_INJECTED, EXTENDED = 0x10, 0x02, 0x01
 
 pytestmark = pytest.mark.local
 
-
-@pytest.fixture(scope="module")
-def exe(tmp_path_factory) -> Path:
-    if deploy.find_csc() is None:
-        pytest.fail("the .NET Framework C# compiler is not on this PC")
-    out = tmp_path_factory.mktemp("tvshell")
-    (out / "logs").mkdir()
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(deploy, "REPO", out)  # the build log goes under REPO/logs
-        deploy.build(out / "TvShell.exe")
-    return out / "TvShell.exe"
+# What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
+COVERS = ("DeskKeys.Classify", "DeskKeys.Cli", "mode:desk-key")
 
 
 def classify(exe: Path, *args: str) -> int:
