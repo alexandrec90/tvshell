@@ -21,9 +21,6 @@
 - [ ] The helper's tests write to the real `%LOCALAPPDATA%/TvShell/tvshell.log`, so a
       test that provokes an ERROR line puts one where the nightly health check reads.
       Give the exe a log-directory override for tests.
-- [ ] The `helper` job in `pr-gate.yml` has not run yet: confirm on its first PR that
-      the Windows runner finds `csc.exe` and the job is green. It reports; it is never
-      made a required check (delivery is `direct`).
 - [ ] `helper/TvShell.cs` is one 700-line file; the structure ratchet only scans Python.
       Split it (helper, launchers, add-on patches, Win32 interop) when it next grows.
 - [ ] The add-on patches in the helper are string replacements that silently stop
@@ -40,3 +37,6 @@
 - [x] Replace the placeholder in `tvshell/` with something that does the job
 - [x] Delete `tests/test_smoke.py` once real tests exist
 - [x] `.env` — none needed: no stack, no ports, no credentials
+- [x] The `helper` job in `pr-gate.yml` has not run yet: confirm on its first PR that
+      the Windows runner finds `csc.exe` and the job is green. It reports; it is never
+      made a required check (delivery is `direct`). Confirmed on `main`: 202 passed
