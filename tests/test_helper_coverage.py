@@ -34,7 +34,7 @@ BASELINE = REPO / "tests" / "helper-untested.txt"
 
 # The number of entries in tests/helper-untested.txt. Lower it when the list shrinks.
 # It never goes up: a function that is new, or newly found untested, gets a test.
-UNTESTED = 94
+UNTESTED = 93
 
 CLASS = re.compile(r"^(?:(?:static|sealed|public|internal|abstract)\s+)*class\s+(\w+)")
 # A member at class level (four spaces): optional attribute, modifiers, a type, a name, "(".

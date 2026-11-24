@@ -75,7 +75,6 @@ Helper.WndProc
 KodiLauncher.Builtin
 KodiLauncher.IsPlaying
 KodiLauncher.LastChannel
-KodiLauncher.Rpc
 KodiLauncher.Run
 KodiLauncher.WaitForKodi
 Launcher.Run

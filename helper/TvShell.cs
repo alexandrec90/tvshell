@@ -544,6 +544,25 @@ static class BlankSteam {
     }
 }
 
+// Focus on the TV but on a window another of ours covers (Kodi behind the game): every press
+// goes to a window nobody can see. Hand focus to the one on top. Only between the game and the
+// TV apps: never away from or onto Steam's windows, whose menu the Home button opens over them.
+static class Uncovered {
+    // Pure: should a press move focus from `fg` to `top`, the window showing on the TV?
+    public static bool Plan(IntPtr top, IntPtr fg, IntPtr game, IntPtr app) {
+        if (top == IntPtr.Zero || top == fg) return false;
+        return (top == game || top == app) && (fg == game || fg == app);
+    }
+    // `TvShell.exe uncovered <top> <focused> <game> <app>`: exits 1 to focus the top window, 0 to
+    // leave focus alone, 254 on bad arguments (0 is no window).
+    public static int Cli(string[] args) {
+        long[] w;
+        try { w = args.Skip(1).Select(long.Parse).ToArray(); } catch (Exception) { return 254; }
+        if (w.Length != 4) return 254;
+        return Plan(new IntPtr(w[0]), new IntPtr(w[1]), new IntPtr(w[2]), new IntPtr(w[3])) ? 1 : 0;
+    }
+}
+
 static class Pad {
     // Report id plus three button bytes, Home and Capture masked off (Home opens Steam's menu), or
     // null for a report that carries no buttons this reads.
@@ -749,9 +768,31 @@ static class N {
         bool att = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
         BringWindowToTop(h); SetForegroundWindow(h);
         if (att) AttachThreadInput(me, fgThread, false);
-        if (GetForegroundWindow() == h) return true;
+        if (Landed(h, GetForegroundWindow)) return true;
         SwitchToThisWindow(h, true);
-        return GetForegroundWindow() == h;
+        return Landed(h, GetForegroundWindow);
+    }
+    // A focus change completes asynchronously: mid-switch the foreground is no window at all, and
+    // the target gets it some ms later. Reading it at once logged "refused (focus stays with no
+    // window)" for switches that then succeeded, so wait while it is in flight (at most 300 ms).
+    static bool Landed(IntPtr h, Func<IntPtr> foreground) {
+        for (int i = 0; i < 15; i++) {
+            var fg = foreground();
+            if (fg == h) return true;
+            if (fg != IntPtr.Zero && i >= 2) return false;   // settled on another window
+            System.Threading.Thread.Sleep(20);
+        }
+        return foreground() == h;
+    }
+    // `TvShell.exe focus-landed <target> <foreground>...`: Landed against a scripted foreground, one
+    // value per reading, the last one repeating (0 is no window). Exits 1 landed, 0 not, 254 on bad
+    // arguments. Lets the tests exercise it without moving the focus.
+    public static int LandedCli(string[] args) {
+        long[] w;
+        try { w = args.Skip(1).Select(long.Parse).ToArray(); } catch (Exception) { return 254; }
+        if (w.Length < 2) return 254;
+        int next = 1;
+        return Landed(new IntPtr(w[0]), () => new IntPtr(w[Math.Min(next++, w.Length - 1)])) ? 1 : 0;
     }
     public const uint SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20;
 
@@ -793,6 +834,10 @@ static class Program {
         if (mode == "pad-keys") return PadKeys.Cli(args);
         if (mode == "desk-key") return DeskKeys.Cli(args);
         if (mode == "close-store-launcher") return Launcher.CloseStoreLauncherCli();
+        if (mode == "stop-kodi-video") return KodiLauncher.StopVideoCli(args);
+        if (mode == "tile-launcher") return Launcher.TileLauncherCli(args);
+        if (mode == "focus-landed") return N.LandedCli(args);
+        if (mode == "uncovered") return Uncovered.Cli(args);
         if (mode == "wait-out-kodi") return KodiLauncher.WaitOutCli(args);
         if (mode == "pad-press") return Pad.Cli(args);
         if (mode == "tv-seat") return TvSeat.Cli(args);
@@ -851,6 +896,10 @@ static class Launcher {
 
         if (Game.Running().Length > 0) {
             Cfg.Log("launch: game already running, only moving it");
+            // Steam Input follows only the process tree of the tile it launched. A game started
+            // at the desk has no tile launcher waiting on it, so the controller never reaches it.
+            if (!TileLauncherRunning())
+                Cfg.Warn("launch: the game was started outside its Steam tile, so the controller will not reach it -> quit it and start it from the tile");
             return 0;
         }
         // The store launcher must be (re)started from here, otherwise the game is spawned by an
@@ -897,6 +946,30 @@ static class Launcher {
             Thread.Sleep(200);
         }
         return false;
+    }
+
+    // Another `TvShell.exe launch` still running: the one a tile started, waiting on the game.
+    static bool TileLauncherRunning() {
+        int me = Process.GetCurrentProcess().Id;
+        try {
+            using (var q = new System.Management.ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='TvShell.exe'"))
+                foreach (System.Management.ManagementObject o in q.Get())
+                    if (Convert.ToInt32(o["ProcessId"]) != me && IsGameLaunch(o["CommandLine"] as string)) return true;
+        } catch (Exception ex) { Cfg.Warn("launch: cannot list TvShell processes: " + ex.Message); return true; }
+        return false;
+    }
+    static bool IsGameLaunch(string cmd) {
+        if (cmd == null) return false;
+        var parts = cmd.Replace("\"", " ").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i + 1 < parts.Length; i++)
+            if (parts[i].EndsWith("TvShell.exe", StringComparison.OrdinalIgnoreCase)) return parts[i + 1].Equals("launch", StringComparison.OrdinalIgnoreCase);
+        return false;
+    }
+
+    // `TvShell.exe tile-launcher`: TileLauncherRunning on this PC, exits 1 when one is running, else
+    // 0. `TvShell.exe tile-launcher <command line>`: IsGameLaunch of that command line, same exits.
+    public static int TileLauncherCli(string[] args) {
+        return (args.Length > 1 ? IsGameLaunch(args[1]) : TileLauncherRunning()) ? 1 : 0;
     }
 
     // `TvShell.exe close-store-launcher`: runs CloseStoreLauncher, exits 0 when none is left.
@@ -990,6 +1063,23 @@ static class KodiLauncher {
     }
     static bool IsPlaying() { return Rpc("Player.GetActivePlayers", "{}").Contains("playerid"); }
 
+    // Stops Kodi's video player, if one is playing; true when it did. Audio (radio) is left alone.
+    internal static bool StopVideo() {
+        var m = System.Text.RegularExpressions.Regex.Match(Rpc("Player.GetActivePlayers", "{}"),
+            "\\{[^{}]*\"playerid\":(\\d+)[^{}]*\"type\":\"video\"[^{}]*\\}");
+        if (!m.Success) return false;
+        return Rpc("Player.Stop", "{\"playerid\":" + m.Groups[1].Value + "}").Contains("\"OK\"");
+    }
+
+    // `TvShell.exe stop-kodi-video <port>`: StopVideo against a Kodi on that local port, exits 1 when
+    // it stopped a video, 0 when not, 254 on bad arguments. Lets the tests use a stand-in Kodi.
+    public static int StopVideoCli(string[] args) {
+        int port;
+        if (args.Length != 2 || !int.TryParse(args[1], out port) || port < 1 || port > 65535) return 254;
+        rpcPort = port;
+        return StopVideo() ? 1 : 0;
+    }
+
     // Most recently watched TV channel (or the first channel if none watched yet); 0 if channels aren't loaded.
     static int LastChannel() {
         var r = Rpc("PVR.GetChannels", "{\"channelgroupid\":\"alltv\",\"properties\":[\"lastplayed\"]}");
@@ -1003,9 +1093,10 @@ static class KodiLauncher {
     }
 
     // One JSON-RPC call to the local Kodi; returns the raw response ("" on failure).
+    static int rpcPort = 9090;
     static string Rpc(string method, string prms) {
         try {
-            using (var c = new System.Net.Sockets.TcpClient("127.0.0.1", 9090)) {
+            using (var c = new System.Net.Sockets.TcpClient("127.0.0.1", rpcPort)) {
                 var s = c.GetStream(); s.ReadTimeout = 5000;
                 if (method != "Player.GetActivePlayers") Cfg.Log("kodi rpc: " + method);
                 var req = Encoding.UTF8.GetBytes("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"" + method + "\",\"params\":" + prms + "}");
@@ -1394,7 +1485,20 @@ class Helper : Form {
         if (!pressed || (DateTime.Now - lastPadFocus).TotalSeconds < 1.5) return;
         // Already using something on the TV - leave it alone. A Steam window counts as the TV
         // unless it sits on the desk (the ordinary Steam client there must not keep the controller).
-        if (FocusIsOnTv() || (SteamInFront() && !FocusIsOnDesk())) return;
+        if (SteamInFront() && !FocusIsOnDesk()) return;
+        if (FocusIsOnTv()) {
+            // ... except a window covered by another of ours: focus the one on top (Uncovered).
+            var tv = Tv(); if (tv == null) return;
+            var centre = new N.POINT { X = tv.Bounds.X + tv.Bounds.Width / 2, Y = tv.Bounds.Y + tv.Bounds.Height / 2 };
+            var top = N.GetAncestor(N.WindowFromPoint(centre), 2);
+            var onGame = GameWindow();
+            if (!Uncovered.Plan(top, N.GetForegroundWindow(), onGame, TvAppWindow())) return;
+            lastPadFocus = DateTime.Now;
+            var covering = top == onGame ? "game" : "TV app";
+            if (N.Focus(top)) Cfg.Log("controller press -> focus was behind the " + covering + " -> focused it");
+            else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> focus is behind the " + covering + " and Windows refused to move it (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
+            return;
+        }
         lastPadFocus = DateTime.Now;
         RememberDeskWindow();
         IntPtr target = IntPtr.Zero;
@@ -1586,11 +1690,17 @@ class Helper : Form {
     // Proc is held from the moment its window appears, so its exit code can be read once it is
     // gone: that is what tells a crash from a close. CrashLog is the app's own log, kept on a crash;
     // ExitedLine is the last line the app logs once it has finished shutting down.
-    class TvApp { public string Name, CrashLog, ExitedLine; public Func<IntPtr> Find; public bool Borderless; public bool Running, FocusPending, CoveredLogged; public Process Proc; }
+    // StopVideoWhenCovered: see KeepTvApp; CoveredSince and StopChecking are its state.
+    class TvApp {
+        public string Name, CrashLog, ExitedLine; public Func<IntPtr> Find; public bool Borderless, StopVideoWhenCovered;
+        public bool Running, FocusPending, CoveredLogged; public Process Proc;
+        public DateTime CoveredSince = DateTime.MinValue; public volatile bool StopChecking;
+    }
+    static readonly TimeSpan CoveredVideoLimit = TimeSpan.FromSeconds(60);
     readonly List<TvApp> tvApps = new List<TvApp> {
         // Kodi runs windowed (its own monitor switching is unreliable): strip the border and make its
         // drawing area exactly cover the TV, so it renders full-screen there.
-        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, CrashLog = Cfg.KodiLog, ExitedLine = Cfg.KodiExitedLine },
+        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, StopVideoWhenCovered = true, CrashLog = Cfg.KodiLog, ExitedLine = Cfg.KodiExitedLine },
         // BackWhenTV's app opens borderless full-screen on the primary display: same treatment.
         new TvApp { Name = "BackWhenTV app", Find = BackWhenApp.Window, Borderless = true },
     }.Concat(WebApp.All.Select(a => new TvApp { Name = a.Name, Find = a.Window, Borderless = false })).ToList();
@@ -1680,15 +1790,39 @@ class Helper : Form {
                 else Cfg.Warn("Windows refused to focus newly started " + a.Name + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")");
             } else Cfg.Log(a.Name + " started while the desk has focus -> left unfocused");
         }
-        // Nothing (e.g. Big Picture) may sit on top of it on the TV - except Steam's menu while you use it.
+        // Nothing (e.g. Big Picture) may sit on top of it on the TV - except Steam's menu while you use it,
+        // and the game: a game on the TV is what the controller is for, and raising the app over
+        // it left the app holding focus behind the game, where no press reached anything visible.
         // Raised without taking focus: this only runs while focus is on the desk, and taking it
         // would send the desk keyboard to the TV. The next controller press focuses it.
         var centre = new N.POINT { X = tv.Bounds.X + tv.Bounds.Width / 2, Y = tv.Bounds.Y + tv.Bounds.Height / 2 };
-        if (N.GetAncestor(N.WindowFromPoint(centre), 2) != h && !SteamInFront() && !FocusIsOnTv()) {
+        var onTop = N.GetAncestor(N.WindowFromPoint(centre), 2);
+        if (onTop != h && (onTop == IntPtr.Zero || onTop != gameHwnd) && !SteamInFront() && !FocusIsOnTv()) {
             N.SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, 0x1 | 0x2 | 0x10 /*NOSIZE|NOMOVE|NOACTIVATE, HWND_TOP*/);
             bool raised = N.GetAncestor(N.WindowFromPoint(centre), 2) == h;
             if (raised || !a.CoveredLogged) Cfg.Log(a.Name + " was covered -> " + (raised ? "brought to front" : "stays covered until the controller is used"));
             a.CoveredLogged = !raised;
+        }
+        // Kodi 21.3 playing video behind another window (the game, Big Picture) stops presenting
+        // frames ("OutputPicture - timeout waiting for buffer" in its log) and minutes later crashes
+        // in its video output. So video left covered for a minute is stopped; radio plays on. The
+        // RPC runs off this timer's thread: it can wait seconds on a busy Kodi.
+        if (a.StopVideoWhenCovered) {
+            bool covered = N.GetAncestor(N.WindowFromPoint(centre), 2) != h;
+            if (!covered) a.CoveredSince = DateTime.MinValue;
+            else if (a.CoveredSince == DateTime.MinValue) a.CoveredSince = DateTime.Now;
+            else if (DateTime.Now - a.CoveredSince >= CoveredVideoLimit && !a.StopChecking) {
+                a.CoveredSince = DateTime.Now;   // still covered: checked again a minute later
+                a.StopChecking = true;
+                var app = a;
+                ThreadPool.QueueUserWorkItem(_ => {
+                    try {
+                        if (KodiLauncher.StopVideo())
+                            Cfg.Log(app.Name + " covered for " + (int)CoveredVideoLimit.TotalSeconds + " s while playing video -> stopped it, Kodi crashes rendering video it cannot show");
+                    } catch (Exception ex) { Cfg.Warn("stopping covered " + app.Name + " video failed: " + ex.Message); }
+                    finally { app.StopChecking = false; }
+                });
+            }
         }
     }
 

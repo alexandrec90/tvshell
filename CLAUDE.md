@@ -88,6 +88,10 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
   a menu in use, and focus goes back to what is running.
 - **Kodi cannot be placed on a monitor reliably**, so it runs windowed and the helper
   strips the border and fits the client area to the TV.
+- **Kodi must not play video it cannot show.** Kodi 21.3 playing video behind another
+  window (the game, Big Picture) stops presenting frames ("OutputPicture - timeout waiting
+  for buffer") and minutes later crashes in its video output. So video that stays covered
+  for a minute is stopped over JSON-RPC; radio, with no video, plays on.
 - **The BackWhenTV app reads only the keyboard**, and Steam Input's keyboard bindings did
   not reach its web player's window either, so the helper turns controller presses into
   keys itself (`PadKeys`), only while the app has focus. Its tile keeps Steam's default
