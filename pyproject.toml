@@ -42,6 +42,7 @@ addopts = '-m "not local" -p devkit_temproot'
 pythonpath = ["scripts/pytest-plugins"]
 markers = [
   "local: needs this workstation, not a runner; deselected by addopts, run nightly by scripts/e2e.py",
+  "helper: runs the built helper exe; set by tests/conftest.py on every test that uses the exe fixture, selected by the deploy gate and the CI helper job",
 ]
 
 [tool.mypy]

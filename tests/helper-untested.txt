@@ -1,0 +1,105 @@
+# Functions and modes of helper/TvShell.cs that no test claims.
+#
+# THIS LIST ONLY SHRINKS. tests/test_helper_coverage.py pins its length and refuses an
+# entry that is stale or that a test now covers. A new helper function is not added here:
+# it gets a test that runs the helper and names it in that module's COVERS.
+#
+# Most of it is window-and-focus code that needs live Win32 state. The DeskPrimary entries
+# (Apply, AtOrigin, Drill, Ensure, IsPrimary, Query, Size, SourceMode) change the real
+# displays; no pytest runs them, but every deploy does, through the display drill
+# (`python -m tvshell.verify --drill`).
+#
+# Sorted, one entry per line.
+BackWhenApp.Exe
+BackWhenApp.HasFocus
+BackWhenApp.Pids
+BackWhenApp.Run
+BackWhenApp.Window
+Cfg.Error
+Cfg.ExitOf
+Cfg.ExitText
+Cfg.Hold
+Cfg.IsCrash
+Cfg.KeepCrashLog
+Cfg.Log
+Cfg.Warn
+Cfg.Write
+DeskPrimary.Apply
+DeskPrimary.AtOrigin
+DeskPrimary.Drill
+DeskPrimary.Ensure
+DeskPrimary.IsPrimary
+DeskPrimary.Query
+DeskPrimary.Size
+DeskPrimary.SourceMode
+Game.Running
+Helper.BigPictureWindows
+Helper.Describe
+Helper.Desk
+Helper.DisplayList
+Helper.DrawTrayIcon
+Helper.EnsureAddonPatches
+Helper.Fault
+Helper.FocusIsOnDesk
+Helper.FocusIsOnTv
+Helper.ForegroundOnTv
+Helper.GameWindow
+Helper.KeepMouseOnDesk
+Helper.KeepTvApp
+Helper.KeepTvApps
+Helper.KodiWindow
+Helper.MoveGame
+Helper.OnDisplays
+Helper.OnForeground
+Helper.OnFormClosed
+Helper.OnHandleCreated
+Helper.OnKey
+Helper.OnPadReport
+Helper.OnPower
+Helper.OnSession
+Helper.PadToKeys
+Helper.PatchAddon
+Helper.RememberDeskWindow
+Helper.RetakeFromBlankSteam
+Helper.ReturnToDesk
+Helper.SendDeskWindowsHome
+Helper.SetTarget
+Helper.SetVisibleCore
+Helper.Steam
+Helper.SteamInFront
+Helper.Tick
+Helper.Tv
+Helper.TvAppGone
+Helper.TvAppWindow
+Helper.WndProc
+KodiLauncher.Builtin
+KodiLauncher.IsPlaying
+KodiLauncher.LastChannel
+KodiLauncher.Run
+KodiLauncher.WaitForKodi
+Launcher.Run
+Launcher.StartLauncher
+Launcher.ViaSteam
+N.ClassOf
+N.ClientScreenRect
+N.Focus
+N.IsCloaked
+N.MonitorId
+N.Place
+N.Rect
+N.WindowsOf
+PadKeys.Press
+TvDisplay.Find
+TvDisplay.Load
+WebApp.ForMode
+WebApp.Pid
+WebApp.Window
+WebAppLauncher.FindBrowser
+WebAppLauncher.IsAnyBrowser
+WebAppLauncher.IsBrowser
+WebAppLauncher.Run
+mode:backwhen-app
+mode:kodi
+mode:launch
+mode:launch-desk
+mode:launch-tv

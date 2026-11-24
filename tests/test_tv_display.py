@@ -21,6 +21,9 @@ NONE = 255
 
 pytestmark = pytest.mark.local
 
+# What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
+COVERS = ("TvDisplay.Pick", "TvDisplay.Matches", "TvDisplay.Cli", "mode:pick-tv")
+
 
 def pick(exe: Path, wanted: str, *displays: str) -> int:
     return subprocess.run([str(exe), "pick-tv", wanted, *displays], check=False).returncode  # noqa: S603 - our own build

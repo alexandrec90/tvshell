@@ -27,8 +27,10 @@ unit_tests = "tests"
 version = "3.12"
 
 # How a finished session's work reaches the default branch: `direct`, by the owner's
-# decision (2026-11-23). A PR from Claude Code's built-in `/ship` merges as it opens,
-# no hook gates its commit or push, and every check runs after the merge.
+# decision (2026-11-23): a fix for the TV is needed at once, and a PR waiting on a gate
+# was the bottleneck. A PR labelled `merge-now` (the ship task's, or Claude Code's
+# built-in `/ship`'s) merges as it opens, no hook gates its commit or push, and every
+# check runs after the merge and repairs what it finds.
 [delivery]
 flow = "direct"
 

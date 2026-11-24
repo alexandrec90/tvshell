@@ -116,6 +116,36 @@ jobs:
             logs/test-failures.log
             logs/junit-hooks.xml
 
+  helper:
+    name: Helper (C#) tests
+    # The helper is C# built by .NET Framework's csc.exe, which only a Windows runner has,
+    # so the Ubuntu `test` job above deselects every test of it. Without this job a change
+    # to helper/TvShell.cs merged with nothing having compiled it, let alone run its tests;
+    # the first run was the nightly local tier, after the merge. `helper` is the marker
+    # tests/conftest.py puts on every test that runs the built exe, and the same selection
+    # `python -m tvshell.deploy` runs beside an install. It reports; delivery is `direct`
+    # (.devkit.toml), so it holds no merge back.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "3.12"
+      - name: Helper tests
+        # pytest exits 5 when it collected nothing, so a selection that matches no test
+        # fails the job rather than passing on zero tests.
+        run: uv run python -m pytest tests -m helper -q --tb=short -rfE --junit-xml=logs/junit-helper.xml
+      - name: Upload helper test artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: helper-test-failures
+          path: |
+            logs/junit-helper.xml
+            logs/build-helper.log
+
   devkit-drift:
     name: Vendored harness drift
     runs-on: ubuntu-latest
