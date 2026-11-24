@@ -502,8 +502,20 @@ static class N {
         bool att = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
         BringWindowToTop(h); SetForegroundWindow(h);
         if (att) AttachThreadInput(me, fgThread, false);
-        if (GetForegroundWindow() == h) return true;
+        if (Landed(h)) return true;
         SwitchToThisWindow(h, true);
+        return Landed(h);
+    }
+    // A focus change completes asynchronously: mid-switch the foreground is no window at all, and
+    // the target gets it some ms later. Reading it at once logged "refused (focus stays with no
+    // window)" for switches that then succeeded, so wait while it is in flight (at most 300 ms).
+    static bool Landed(IntPtr h) {
+        for (int i = 0; i < 15; i++) {
+            var fg = GetForegroundWindow();
+            if (fg == h) return true;
+            if (fg != IntPtr.Zero && i >= 2) return false;   // settled on another window
+            System.Threading.Thread.Sleep(20);
+        }
         return GetForegroundWindow() == h;
     }
     public const uint SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20;
@@ -597,6 +609,10 @@ static class Launcher {
 
         if (Game.Running().Length > 0) {
             Cfg.Log("launch: game already running, only moving it");
+            // Steam Input follows only the process tree of the tile it launched. A game started
+            // at the desk has no tile launcher waiting on it, so the controller never reaches it.
+            if (!TileLauncherRunning())
+                Cfg.Warn("launch: the game was started outside its Steam tile, so the controller will not reach it -> quit it and start it from the tile");
             return 0;
         }
         // The store launcher must be (re)started from here, otherwise the game is spawned by an
@@ -642,6 +658,24 @@ static class Launcher {
             if (Process.GetProcessesByName(Game.LauncherProcess).Length == 0) return true;
             Thread.Sleep(200);
         }
+        return false;
+    }
+
+    // Another `TvShell.exe launch` still running: the one a tile started, waiting on the game.
+    static bool TileLauncherRunning() {
+        int me = Process.GetCurrentProcess().Id;
+        try {
+            using (var q = new System.Management.ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='TvShell.exe'"))
+                foreach (System.Management.ManagementObject o in q.Get())
+                    if (Convert.ToInt32(o["ProcessId"]) != me && IsGameLaunch(o["CommandLine"] as string)) return true;
+        } catch (Exception ex) { Cfg.Warn("launch: cannot list TvShell processes: " + ex.Message); return true; }
+        return false;
+    }
+    static bool IsGameLaunch(string cmd) {
+        if (cmd == null) return false;
+        var parts = cmd.Replace("\"", " ").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i + 1 < parts.Length; i++)
+            if (parts[i].EndsWith("TvShell.exe", StringComparison.OrdinalIgnoreCase)) return parts[i + 1].Equals("launch", StringComparison.OrdinalIgnoreCase);
         return false;
     }
 
@@ -1113,7 +1147,8 @@ class Helper : Form {
         if (!pressed || (DateTime.Now - lastPadFocus).TotalSeconds < 1.5) return;
         // Already using something on the TV - leave it alone. A Steam window counts as the TV
         // unless it sits on the desk (the ordinary Steam client there must not keep the controller).
-        if (FocusIsOnTv() || (SteamInFront() && !FocusIsOnDesk())) return;
+        if (SteamInFront() && !FocusIsOnDesk()) return;
+        if (FocusIsOnTv()) { FocusUncovered(); return; }
         lastPadFocus = DateTime.Now;
         RememberDeskWindow();
         IntPtr target = IntPtr.Zero;
@@ -1128,6 +1163,24 @@ class Helper : Form {
             if (N.Focus(target)) Cfg.Log("controller press -> focused " + what);
             else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> Windows refused to focus " + what + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
         }
+    }
+
+    // Focus on the TV but on a window another of ours covers (Kodi behind the game): every press
+    // goes to a window nobody can see. Hand focus to the one on top. Only between the game and the
+    // TV apps: never away from or onto Steam's windows, whose menu the Home button opens over them.
+    void FocusUncovered() {
+        var tv = Tv(); if (tv == null) return;
+        var fg = N.GetForegroundWindow();
+        var centre = new N.POINT { X = tv.Bounds.X + tv.Bounds.Width / 2, Y = tv.Bounds.Y + tv.Bounds.Height / 2 };
+        var top = N.GetAncestor(N.WindowFromPoint(centre), 2);
+        if (top == IntPtr.Zero || top == fg) return;
+        var game = GameWindow(); var app = TvAppWindow();
+        if (top != game && top != app) return;
+        if (fg != game && fg != app) return;
+        lastPadFocus = DateTime.Now;
+        var what = top == game ? "game" : "TV app";
+        if (N.Focus(top)) Cfg.Log("controller press -> focus was behind the " + what + " -> focused it");
+        else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> focus is behind the " + what + " and Windows refused to move it (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
     }
 
     // While the keyboard-only BackWhenTV app has focus, newly pressed buttons become its keys.
@@ -1399,11 +1452,14 @@ class Helper : Form {
                 else Cfg.Warn("Windows refused to focus newly started " + a.Name + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")");
             } else Cfg.Log(a.Name + " started while the desk has focus -> left unfocused");
         }
-        // Nothing (e.g. Big Picture) may sit on top of it on the TV - except Steam's menu while you use it.
+        // Nothing (e.g. Big Picture) may sit on top of it on the TV - except Steam's menu while you use it,
+        // and the game: a game on the TV is what the controller is for, and raising the app over
+        // it left the app holding focus behind the game, where no press reached anything visible.
         // Raised without taking focus: this only runs while focus is on the desk, and taking it
         // would send the desk keyboard to the TV. The next controller press focuses it.
         var centre = new N.POINT { X = tv.Bounds.X + tv.Bounds.Width / 2, Y = tv.Bounds.Y + tv.Bounds.Height / 2 };
-        if (N.GetAncestor(N.WindowFromPoint(centre), 2) != h && !SteamInFront() && !FocusIsOnTv()) {
+        var onTop = N.GetAncestor(N.WindowFromPoint(centre), 2);
+        if (onTop != h && (onTop == IntPtr.Zero || onTop != gameHwnd) && !SteamInFront() && !FocusIsOnTv()) {
             N.SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, 0x1 | 0x2 | 0x10 /*NOSIZE|NOMOVE|NOACTIVATE, HWND_TOP*/);
             bool raised = N.GetAncestor(N.WindowFromPoint(centre), 2) == h;
             if (raised || !a.CoveredLogged) Cfg.Log(a.Name + " was covered -> " + (raised ? "brought to front" : "stays covered until the controller is used"));
