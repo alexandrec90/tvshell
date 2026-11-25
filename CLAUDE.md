@@ -30,7 +30,8 @@ The repository is the **source**. What runs is installed outside it, in
 Steam tile and the desktop shortcut point at `~/TvShell/TvShell.exe`, so a checkout can
 move or be deleted without breaking the TV. `python -m tvshell.deploy` builds the helper
 from `helper/` and swaps it in; a launcher still running from the old exe (a game or
-Kodi in progress) keeps running.
+Kodi in progress) keeps running. A deploy from a branch puts back a helper without what
+other branches merged, so the scheduled `scripts/e2e.py` installs the merged one afterwards.
 
 The install directory also holds runtime state the helper owns: the YouTube Chrome
 profile (`yt-profile/`), `steam-gameid.txt`, and its log under

@@ -24,6 +24,14 @@ rewrite `uv.lock`. The other two because pytest lives in the `dev` extra: in a t
 no `.venv` yet, a bare `uv run` builds one without it and the run ends
 `No module named pytest`.
 
+**The scheduled run then installs the merged helper**, when the one on the TV is from any
+other source. A deploy by hand comes from a branch, so it can put back a helper without
+fixes another branch merged, and a merge by itself installs nothing: five merged changes
+once sat uninstalled for a day while the crash one of them prevents kept happening. After
+the tests, not before, because the health check reads only what the installed build did.
+Only in the checkout itself with `helper/` as on `origin/main`: never from a worktree, where a
+fixer runs this same script on work in progress.
+
 Stdlib only, for `.claude/rules/task-scripts.md`'s reason: the caller may be the machine's
 Python, not this project's. The junit report stays in `logs/e2e-junit.xml`.
 
@@ -159,6 +167,40 @@ def run_env(env: Mapping[str, str], root: Path) -> dict[str, str]:
     return out
 
 
+# No display drill: the PC is idle, but someone may be watching the TV.
+INSTALL_ARGV = [
+    "uv",
+    "run",
+    "--frozen",
+    "--all-extras",
+    "--all-groups",
+    "python",
+    "-m",
+    "tvshell.deploy",
+    "--if-stale",
+    "--no-drill",
+]
+
+
+def installs_merged(
+    root: Path, named: Sequence[str], strict: bool, runner: Callable[..., object]
+) -> bool:
+    """Whether this run is the nightly one, in the checkout itself, with the merged helper.
+
+    A worktree's `.git` is a file, so a fixer's run on a branch never installs.
+    """
+    if not strict or named or not (root / ".git").is_dir():
+        return False
+    diff = runner(
+        ["git", "diff", "--quiet", "origin/main", "--", "helper"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        creationflags=NO_WINDOW,
+    )
+    return getattr(diff, "returncode", 1) == 0
+
+
 def _printable(text: str) -> str:
     """ASCII, so a by-hand run on a cp1252 console cannot die printing a traceback."""
     return text.encode("ascii", "backslashreplace").decode("ascii")
@@ -186,7 +228,25 @@ def main(
     )
     print(_printable(done.stdout or ""), end="", flush=True)
     print(_printable(done.stderr or ""), end="", file=sys.stderr, flush=True)
-    code, lines = verdict(done.returncode, cases(REPORT), bool(env.get(ENV_FLAG)))
+    strict = bool(env.get(ENV_FLAG))
+    code, lines = verdict(done.returncode, cases(REPORT), strict)
+    if installs_merged(REPO_ROOT, named, strict, runner):
+        deployed = runner(
+            INSTALL_ARGV,
+            cwd=REPO_ROOT,
+            env=run_env(env, REPO_ROOT),
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            creationflags=NO_WINDOW,
+        )
+        print(_printable((deployed.stdout or "") + (deployed.stderr or "")), end="", flush=True)
+        if deployed.returncode:
+            code = code or 1
+            lines.append(
+                "FAILED tvshell/deploy.py::install_merged - the merged helper's deploy is red"
+            )
     for line in lines:
         print(_printable(line), flush=True)
     print(f"e2e: report in {REPORT.relative_to(REPO_ROOT).as_posix()}", flush=True)

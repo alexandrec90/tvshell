@@ -23,12 +23,17 @@ report of what to fix next, not a refusal.
     python -m tvshell.deploy              # build, install, test, verify
     python -m tvshell.deploy --no-drill   # the same, without the display drill
     python -m tvshell.deploy --build      # compile only, into logs/
+    python -m tvshell.deploy --if-stale   # nothing when this source is what is installed
+
+The installed source's digest is kept beside the exe (``SOURCE_STAMP``), which is how
+``--if-stale`` knows. The nightly tier uses it to install what merged.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import os
 import shutil
 import subprocess
@@ -49,6 +54,27 @@ REFERENCES = ("System.Windows.Forms.dll", "System.Drawing.dll", "System.Manageme
 TEST_EXE_ENV = "TVSHELL_TEST_EXE"
 TESTS_MARKER = "helper"
 TESTS_TIMEOUT = 600  # seconds; a hung test run is reported as red, never waited on forever
+
+
+# Beside the installed exe: the digest of the source it was built from.
+SOURCE_STAMP = "TvShell.source.sha256"
+
+
+def source_digest(source: Path) -> str:
+    """The helper source's digest, the same whatever line endings the checkout has."""
+    return hashlib.sha256(source.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
+def is_stale(install_dir: Path, source: Path) -> bool:
+    """Whether the installed helper was built from anything but `source`.
+
+    Unknown (no exe, or one from before the stamp) is stale.
+    """
+    try:
+        stamp = (install_dir / SOURCE_STAMP).read_text(encoding="utf-8").strip()
+    except OSError:
+        return True
+    return not (install_dir / "TvShell.exe").exists() or stamp != source_digest(source)
 
 
 def find_csc(windir: str | None = None) -> Path | None:
@@ -183,8 +209,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the display drill after installing (it flickers both screens for a few seconds)",
     )
+    parser.add_argument(
+        "--if-stale",
+        action="store_true",
+        help="do nothing when the installed helper was built from this very source",
+    )
     args = parser.parse_args(argv)
 
+    if args.if_stale and not is_stale(args.install_dir, SOURCE):
+        print("the installed helper is this source, nothing to do")
+        return 0
     if args.build:
         build(REPO / "logs" / "TvShell.exe")
         print(f"built {REPO / 'logs' / 'TvShell.exe'}")
@@ -204,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     target = args.install_dir / "TvShell.exe"
     try:
         install(staged, args.install_dir)
+        (args.install_dir / SOURCE_STAMP).write_text(source_digest(SOURCE), encoding="utf-8")
     finally:
         # The helper is already stopped: whatever happened, start the exe that is in place,
         # so a failed swap never leaves the TV without it.

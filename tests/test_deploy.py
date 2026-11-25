@@ -259,9 +259,41 @@ def test_main_runs_the_tests_on_every_deploy():
     # every deploy says what it broke.
     with pytest.raises(SystemExit):
         deploy.main(["--skip-tests"])
-    parser_flags = {"--build", "--install-dir", "--no-drill"}
+    parser_flags = {"--build", "--install-dir", "--no-drill", "--if-stale"}
     source = Path(deploy.__file__).read_text(encoding="utf-8")
     assert set(re.findall(r'add_argument\(\s*"(--[\w-]+)"', source)) == parser_flags
+
+
+def test_source_digest_ignores_line_endings(tmp_path):
+    lf, crlf, other = (tmp_path / name for name in ("lf.cs", "crlf.cs", "other.cs"))
+    lf.write_bytes(b"a\nb\n")
+    crlf.write_bytes(b"a\r\nb\r\n")
+    other.write_bytes(b"a\nc\n")
+    assert deploy.source_digest(lf) == deploy.source_digest(crlf) != deploy.source_digest(other)
+
+
+def test_is_stale(tmp_path):
+    source = tmp_path / "TvShell.cs"
+    source.write_bytes(b"one\n")
+    assert deploy.is_stale(tmp_path, source), "nothing installed, or before the stamp"
+    stamp = tmp_path / deploy.SOURCE_STAMP
+    stamp.write_text(deploy.source_digest(source), encoding="utf-8")
+    assert deploy.is_stale(tmp_path, source), "a stamp with no exe beside it"
+    (tmp_path / "TvShell.exe").write_bytes(b"exe")
+    assert not deploy.is_stale(tmp_path, source)
+    source.write_bytes(b"two\n")
+    assert deploy.is_stale(tmp_path, source)
+
+
+def test_main_if_stale_installs_once(monkeypatch, tmp_path):
+    fake = FakeDeploy(monkeypatch, tmp_path)
+    assert fake.main("--if-stale", "--no-drill") == 0
+    assert fake.installed.read_bytes() == b"new"
+    done = list(fake.calls)
+    assert fake.main("--if-stale", "--no-drill") == 0
+    assert fake.calls == done, "the same source is not installed again"
+    assert fake.main("--no-drill") == 0
+    assert len(fake.calls) > len(done), "a plain deploy always installs"
 
 
 def test_main_checks_the_installed_helper_at_work_and_drills_the_displays(monkeypatch, tmp_path):

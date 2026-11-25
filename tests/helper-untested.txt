@@ -19,7 +19,6 @@ Cfg.Error
 Cfg.ExitOf
 Cfg.ExitText
 Cfg.Hold
-Cfg.IsCrash
 Cfg.KeepCrashLog
 Cfg.Log
 Cfg.Warn

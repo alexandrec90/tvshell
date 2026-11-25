@@ -99,6 +99,61 @@ def test_a_tree_with_no_venv_runs_without_the_sessions_no_sync(tmp_path):
     assert e2e.run_env(session, tmp_path)[e2e.NO_SYNC] == "1", "a borrowed .venv is left alone"
 
 
+class Runs:
+    """A fake `subprocess.run`: pytest passes, and git and the deploy exit as told."""
+
+    def __init__(self, helper_differs=0, deploy=0):
+        self.calls: list[list[str]] = []
+        self.codes = {"git": helper_differs, "deploy": deploy}
+
+    def __call__(self, argv, **_kwargs):
+        self.calls.append(list(argv))
+        if argv[0] == "git":
+            return subprocess.CompletedProcess(argv, self.codes["git"])
+        if argv == e2e.INSTALL_ARGV:
+            return subprocess.CompletedProcess(argv, self.codes["deploy"], "deployed\n", "")
+        write_report(e2e.REPORT, '<testcase classname="tests.test_x" name="test_y"/>')
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+
+@pytest.fixture
+def checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(e2e, "REPORT", tmp_path / "logs" / "e2e-junit.xml")
+    monkeypatch.setattr(e2e, "REPO_ROOT", tmp_path)
+    (tmp_path / ".git").mkdir()
+    return tmp_path
+
+
+def test_the_nightly_run_installs_the_merged_helper_after_the_tests(checkout):
+    runs = Runs()
+    assert e2e.main([], runner=runs, env={e2e.ENV_FLAG: "1"}) == 0
+    assert runs.calls[-1] == e2e.INSTALL_ARGV
+    assert "pytest" in runs.calls[0]
+
+
+def test_installs_merged_asks_git_about_the_helper_only(checkout):
+    runs = Runs()
+    assert e2e.installs_merged(checkout, [], True, runs)
+    assert runs.calls == [["git", "diff", "--quiet", "origin/main", "--", "helper"]]
+
+
+def test_a_red_deploy_is_a_named_failure(checkout, capsys):
+    assert e2e.main([], runner=Runs(deploy=1), env={e2e.ENV_FLAG: "1"}) == 1
+    assert "FAILED tvshell/deploy.py::install_merged" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("why", ["by hand", "named tests", "worktree", "helper not as merged"])
+def test_no_other_run_installs_anything(checkout, why):
+    if why == "worktree":
+        (checkout / ".git").rmdir()
+        (checkout / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    runs = Runs(helper_differs=1 if why == "helper not as merged" else 0)
+    named = ["tests/test_x.py"] if why == "named tests" else []
+    env = {} if why == "by hand" else {e2e.ENV_FLAG: "1"}
+    assert e2e.main(named, runner=runs, env=env) == 0
+    assert e2e.INSTALL_ARGV not in runs.calls
+
+
 def test_main_runs_pytest_and_reports(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(e2e, "REPORT", tmp_path / "logs" / "e2e-junit.xml")
     monkeypatch.setattr(e2e, "REPO_ROOT", tmp_path)
