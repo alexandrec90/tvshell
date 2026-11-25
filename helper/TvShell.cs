@@ -65,8 +65,8 @@ static class Cfg {
     }
 
     // An exit code as a person reads it. A crash is an NTSTATUS value (0xC0000005 is an access
-    // violation); `taskkill /F` gives 1.
-    public static bool IsCrash(int code) { return unchecked((uint)code) >= 0xC0000000; }
+    // violation); `taskkill /F` gives 1 and .NET's Process.Kill gives -1.
+    public static bool IsCrash(int code) { return code != -1 && unchecked((uint)code) >= 0xC0000000; }
     public static string ExitText(int code) {
         uint u = unchecked((uint)code);
         if (!IsCrash(code)) return code.ToString();
@@ -108,6 +108,23 @@ static class Cfg {
 
     public static string ExitOf(Process p) {
         try { return p.HasExited ? "exit " + ExitText(p.ExitCode) : "still running"; } catch { return "exit code unknown"; }
+    }
+}
+
+// How a TV app ended, from its exit code and its own log.
+static class AppExit {
+    public enum Kind { Closed = 0, CrashedAfterShutdown = 1, Crashed = 2 }
+    // Kodi 21.3 crashes in its last teardown on most exits, after it has saved everything and
+    // logged `exitedLine`: Kodi's defect, which nothing here can fix.
+    public static Kind Judge(int code, string log, string exitedLine) {
+        if (!Cfg.IsCrash(code)) return Kind.Closed;
+        return log != null && exitedLine != null && Cfg.LogEndsWith(log, exitedLine) ? Kind.CrashedAfterShutdown : Kind.Crashed;
+    }
+    // `TvShell.exe app-exit <exit code> <log> <exited line>`: exits with the Kind, 254 on bad arguments.
+    public static int Cli(string[] args) {
+        int code;
+        if (args.Length != 4 || !int.TryParse(args[1], out code)) return 254;
+        return (int)Judge(code, args[2], args[3]);
     }
 }
 
@@ -838,6 +855,7 @@ static class Program {
         if (mode == "tile-launcher") return Launcher.TileLauncherCli(args);
         if (mode == "focus-landed") return N.LandedCli(args);
         if (mode == "uncovered") return Uncovered.Cli(args);
+        if (mode == "app-exit") return AppExit.Cli(args);
         if (mode == "wait-out-kodi") return KodiLauncher.WaitOutCli(args);
         if (mode == "pad-press") return Pad.Cli(args);
         if (mode == "tv-seat") return TvSeat.Cli(args);
@@ -934,17 +952,26 @@ static class Launcher {
     }
 
     // Kills every process named launcher_process in game.cfg and waits up to 10 s for them to
-    // go. True when none is left (or none is configured).
+    // go, killing any that starts meanwhile (the store launcher respawns its parts, and one
+    // born after the first listing used to outlive it). True when none is left (or none is
+    // configured).
     static bool CloseStoreLauncher(string why) {
         if (Game.LauncherProcess.Length == 0) return true;
         var running = Process.GetProcessesByName(Game.LauncherProcess);
         if (running.Length == 0) return true;
         Cfg.Log("launch: " + why + " (" + running.Length + " procs)");
-        foreach (var p in running) { try { p.Kill(); } catch (Exception ex) { Cfg.Warn("launch: cannot kill store launcher pid " + p.Id + ": " + ex.Message); } }
+        var killed = new HashSet<int>();
         for (int i = 0; i < 50; i++) {
-            if (Process.GetProcessesByName(Game.LauncherProcess).Length == 0) return true;
+            foreach (var p in running) {
+                if (!killed.Add(p.Id)) continue;   // killed already, still on its way out
+                if (i > 0) Cfg.Log("launch: store launcher pid " + p.Id + " started meanwhile, closing it too");
+                try { p.Kill(); } catch (Exception ex) { Cfg.Warn("launch: cannot kill store launcher pid " + p.Id + ": " + ex.Message); }
+            }
             Thread.Sleep(200);
+            running = Process.GetProcessesByName(Game.LauncherProcess);
+            if (running.Length == 0) return true;
         }
+        Cfg.Warn("launch: store launcher left running: " + string.Join(", ", running.Select(p => "pid " + p.Id + (killed.Contains(p.Id) ? " (killed, not gone)" : " (just started)"))));
         return false;
     }
 
@@ -1706,28 +1733,35 @@ class Helper : Form {
     }.Concat(WebApp.All.Select(a => new TvApp { Name = a.Name, Find = a.Window, Borderless = false })).ToList();
 
     // How a TV app's window went away, logged once. A crash is an ERROR, with the app's log kept.
+    // Kodi takes up to ten seconds to end after its window goes, and can crash in them, so an app
+    // still running is waited for off this timer's thread: without that its log was lost to its
+    // next start and nobody could say whether the crash came after it had shut down.
     void TvAppGone(TvApp a) {
         var p = a.Proc; a.Proc = null;
-        string how = "process unknown";
-        bool crashed = false;
-        if (p != null) {
-            try {
-                if (p.WaitForExit(2000)) { how = Cfg.ExitOf(p); crashed = Cfg.IsCrash(p.ExitCode); }
-                else how = "window gone but process " + p.Id + " still running";
-            } catch (Exception ex) { how = "exit code unknown: " + ex.Message; }
+        if (p == null) { Cfg.Log(a.Name + " closed (process unknown)"); return; }
+        Action ended = () => {
+            string how; int code;
+            try { how = Cfg.ExitOf(p); code = p.ExitCode; }
+            catch (Exception ex) { how = "exit code unknown: " + ex.Message; code = 0; }
             p.Dispose();
-        }
-        if (!crashed) { Cfg.Log(a.Name + " closed (" + how + ")"); return; }
-        // Kodi 21.3 corrupts its heap in its last teardown on most exits, after it has saved
-        // everything: Kodi's defect, which nothing here can fix, so a WARN and not an ERROR.
-        bool afterShutdown = a.ExitedLine != null && a.CrashLog != null && Cfg.LogEndsWith(a.CrashLog, a.ExitedLine);
-        var kept = a.CrashLog == null ? "" : Cfg.KeepCrashLog(a.Name.ToLowerInvariant(), a.CrashLog);
-        if (afterShutdown) {
-            Cfg.Warn(a.Name + " crashed after it finished shutting down (" + how + ")" + (kept != "" ? "; its log is kept at " + kept : ""));
-            return;
-        }
-        Cfg.Error(a.Name + " crashed (" + how + ")" + (kept != "" ? "; its log is kept at " + kept : "")
-            + "; the game " + (Game.Running().Length > 0 ? "was" : "was not") + " running");
+            var kind = AppExit.Judge(code, a.CrashLog, a.ExitedLine);
+            if (kind == AppExit.Kind.Closed) { Cfg.Log(a.Name + " closed (" + how + ")"); return; }
+            var kept = a.CrashLog == null ? "" : Cfg.KeepCrashLog(a.Name.ToLowerInvariant(), a.CrashLog);
+            if (kind == AppExit.Kind.CrashedAfterShutdown) {   // the app's defect: a WARN, not an ERROR
+                Cfg.Warn(a.Name + " crashed after it finished shutting down (" + how + ")" + (kept != "" ? "; its log is kept at " + kept : ""));
+                return;
+            }
+            Cfg.Error(a.Name + " crashed (" + how + ")" + (kept != "" ? "; its log is kept at " + kept : "")
+                + "; the game " + (Game.Running().Length > 0 ? "was" : "was not") + " running");
+        };
+        try {
+            if (!p.WaitForExit(2000)) {
+                Cfg.Log(a.Name + " window gone, process " + p.Id + " still running");
+                new Thread(() => { try { p.WaitForExit(); } catch { } ended(); }) { IsBackground = true }.Start();
+                return;
+            }
+        } catch { }   // `ended` says what is not known
+        ended();
     }
     // One TV app at a time, like a TV. A second one started from its tile closes the first:
     // left open, the first sits behind the second with its tile still "running", and the

@@ -10,6 +10,7 @@ beside a fresh build, so no real launcher is touched.
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -69,6 +70,26 @@ def test_closes_every_instance_of_the_store_launcher(built):
     try:
         assert close(built, f"process=NoSuchGame\nlauncher=x.exe\nlauncher_process={FAKE}\n") == 0
         assert not any(alive(p) for p in procs)
+    finally:
+        for p in procs:
+            p.kill()
+
+
+def test_closes_an_instance_that_starts_while_the_others_are_being_closed(built):
+    """A part respawned after the first listing outlived it, and the tile stayed on Resume."""
+    spawn = [str(built / (FAKE + ".exe"))]
+    procs = [subprocess.Popen(spawn)]  # noqa: S603 - our own build
+
+    def respawn() -> None:
+        procs[0].wait(timeout=30)
+        procs.append(subprocess.Popen(spawn))  # noqa: S603 - our own build
+
+    watcher = threading.Thread(target=respawn)
+    watcher.start()
+    try:
+        assert close(built, f"process=NoSuchGame\nlauncher=x.exe\nlauncher_process={FAKE}\n") == 0
+        watcher.join(timeout=30)
+        assert len(procs) == 2 and not any(alive(p) for p in procs)
     finally:
         for p in procs:
             p.kill()
