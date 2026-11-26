@@ -152,7 +152,7 @@ def test_pad_target_usage(exe, args):
     [
         ("1", "0", "1", NO, "the game took focus"),
         ("0", "1", "0", YES, "a TV app took focus"),
-        ("0", "0", "1", YES, "a desk window (Battle.net, the taskbar) changes nothing"),
+        ("0", "0", "1", YES, "a desk window (the store launcher, the taskbar) changes nothing"),
         ("0", "0", "0", NO, "nor here"),
     ],
 )

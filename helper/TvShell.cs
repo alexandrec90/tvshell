@@ -633,7 +633,7 @@ static class PadFocus {
     }
 
     // Pure: after focus moves to a window, was a TV app (not the game) the last of the two used?
-    // Any other window (the desk, Steam, Battle.net) leaves the answer as it was.
+    // Any other window (the desk, Steam, the store launcher) leaves the answer as it was.
     public static bool UsedLast(bool isGame, bool isApp, bool before) {
         if (isGame) return false;
         return isApp || before;
