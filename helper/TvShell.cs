@@ -606,6 +606,49 @@ static class PadFocus {
         }
         return (int)Plan(b[0], b[1], b[2], b[3]);
     }
+
+    // Which window a press that takes focus from the desk gives it to. The TV app when it is the
+    // one last used on the TV: focus wanders to the desk while a TV app plays (the game's store
+    // launcher pops up there, the taskbar takes it), and handing the next press to the game put
+    // the game over Kodi, whose covered-video guard then stopped the channel being watched.
+    // Otherwise the game when it is on the TV, then the TV app; a game on the desk keeps focus
+    // where it is, and with neither, Big Picture.
+    public enum Target { None = 0, Game = 1, App = 2, BigPicture = 3 }
+    public static Target Pick(bool game, bool gameOnTv, bool app, bool appUsedLast) {
+        if (app && appUsedLast) return Target.App;
+        if (game && gameOnTv) return Target.Game;
+        if (app) return Target.App;
+        return game ? Target.None : Target.BigPicture;
+    }
+    // `TvShell.exe pad-target <game> <game on tv> <app> <app used last>`, each 0 or 1: exits with
+    // the Target, 254 on bad arguments.
+    public static int TargetCli(string[] args) {
+        if (args.Length != 5) return 254;
+        var b = new bool[4];
+        for (int i = 0; i < 4; i++) {
+            if (args[i + 1] == "1") b[i] = true;
+            else if (args[i + 1] != "0") return 254;
+        }
+        return (int)Pick(b[0], b[1], b[2], b[3]);
+    }
+
+    // Pure: after focus moves to a window, was a TV app (not the game) the last of the two used?
+    // Any other window (the desk, Steam, Battle.net) leaves the answer as it was.
+    public static bool UsedLast(bool isGame, bool isApp, bool before) {
+        if (isGame) return false;
+        return isApp || before;
+    }
+    // `TvShell.exe pad-used-last <is game> <is app> <before>`, each 0 or 1: exits 1 when a TV app
+    // was used last, 0 when not, 254 on bad arguments.
+    public static int UsedLastCli(string[] args) {
+        if (args.Length != 4) return 254;
+        var b = new bool[3];
+        for (int i = 0; i < 3; i++) {
+            if (args[i + 1] == "1") b[i] = true;
+            else if (args[i + 1] != "0") return 254;
+        }
+        return UsedLast(b[0], b[1], b[2]) ? 1 : 0;
+    }
 }
 
 static class Pad {
@@ -887,6 +930,8 @@ static class Program {
         if (mode == "wait-out-kodi") return KodiLauncher.WaitOutCli(args);
         if (mode == "pad-press") return Pad.Cli(args);
         if (mode == "pad-focus") return PadFocus.Cli(args);
+        if (mode == "pad-target") return PadFocus.TargetCli(args);
+        if (mode == "pad-used-last") return PadFocus.UsedLastCli(args);
         if (mode == "tv-seat") return TvSeat.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "desk-primary") return DeskPrimary.Cli(args);
@@ -1399,7 +1444,13 @@ class Helper : Form {
     IntPtr fgHook = IntPtr.Zero; N.WinEventProc fgHookProc;   // held in a field, like keyHookProc
     void OnForeground(IntPtr hook, uint ev, IntPtr h, int obj, int child, uint thread, uint time) {
         try { Cfg.Log("focus -> " + Describe(h)); } catch { }
+        try {
+            uint pid; N.GetWindowThreadProcessId(h, out pid);
+            bool isApp = h != IntPtr.Zero && tvApps.Any(a => a.Running && a.Proc != null && a.Proc.Id == (int)pid);
+            tvAppUsedLast = PadFocus.UsedLast(h != IntPtr.Zero && h == gameHwnd, isApp, tvAppUsedLast);
+        } catch { }
     }
+    bool tvAppUsedLast = false;   // a TV app, not the game, was the last of the two focused (PadFocus)
 
     // A window as the log names it: process, pid, screen. The title only for windows on the TV;
     // desk titles (documents, browser tabs) are the person's business, not the log's.
@@ -1558,17 +1609,22 @@ class Helper : Form {
             return;
         }
         lastPadFocus = DateTime.Now;
+        // Which window the press took focus from, and where it sat: switching from the game to
+        // Live TV in Steam's overlay reaches this branch although the game had focus on the TV.
+        var from = N.GetForegroundWindow();
+        var fromText = Describe(from) + " at " + N.Rect(from);
         RememberDeskWindow();
         IntPtr target = IntPtr.Zero;
         var game = GameWindow();
         var kodi = TvAppWindow();
-        if (game != IntPtr.Zero && gameScreen == "tv") target = game;
-        else if (kodi != IntPtr.Zero) target = kodi;
-        else if (game != IntPtr.Zero) return;   // the game is on the desk display: leave focus alone
+        var pick = PadFocus.Pick(game != IntPtr.Zero, gameScreen == "tv", kodi != IntPtr.Zero, tvAppUsedLast);
+        if (pick == PadFocus.Target.Game) target = game;
+        else if (pick == PadFocus.Target.App) target = kodi;
+        else if (pick == PadFocus.Target.None) return;   // the game is on the desk display: leave focus alone
         else { var bp = BigPictureWindows(); if (bp.Count > 0) target = bp[0]; }
         if (target != IntPtr.Zero && N.GetForegroundWindow() != target) {
             var what = target == game ? "game" : target == kodi ? "TV app" : "Big Picture";
-            if (N.Focus(target)) Cfg.Log("controller press -> focused " + what);
+            if (N.Focus(target)) Cfg.Log("controller press -> focused " + what + " (focus was with " + fromText + ")");
             else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> Windows refused to focus " + what + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
         }
     }

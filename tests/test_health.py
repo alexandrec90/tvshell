@@ -81,6 +81,16 @@ def test_focus_finding_needs_many_refusals_and_a_large_share():
     assert health.focus_finding(refused + granted * 20) is None
 
 
+def test_a_granted_press_still_counts_when_it_names_where_focus_was():
+    refused = [entry("controller press -> Windows refused to focus game", "WARN")] * 5
+    granted = [
+        entry(
+            "controller press -> focused game (focus was with chrome[1] on desk at {X=0,Y=0,Width=1920,Height=1200})"
+        )
+    ] * 20
+    assert health.focus_finding(refused + granted) is None
+
+
 def test_focus_finding_counts_the_keyboard_too():
     keys = [entry("keyboard on desk -> Windows refused the focus change", "WARN")] * 5
     back = [entry("keyboard on desk -> focus back to the desk")] * 11
