@@ -580,6 +580,34 @@ static class Uncovered {
     }
 }
 
+// What a controller press does to focus. The helper only ever takes focus from the desk display:
+// a press with focus on the TV is the TV's own (at most Uncovered), and a press while no window
+// has focus is one that lands mid-switch. Steam's overlay switching from the game to a TV app is
+// such a switch: no window is focused for a moment, and taking focus for the game then left the
+// game on top and Steam's menu in the TV app behind it, driven by the controller and out of sight.
+// No window at all has an empty rectangle at (0,0), which is on the desk: hence `hasForeground`.
+static class PadFocus {
+    public enum Act { Leave = 0, Uncover = 1, TakeToTv = 2 }
+    // Pure. `onTv` / `onDesk`: the focused window's centre is on that display.
+    public static Act Plan(bool hasForeground, bool steamInFront, bool onTv, bool onDesk) {
+        if (!hasForeground) return Act.Leave;
+        if (steamInFront && !onDesk) return Act.Leave;
+        if (onTv) return Act.Uncover;
+        return onDesk ? Act.TakeToTv : Act.Leave;   // off both displays: not the desk's to give
+    }
+    // `TvShell.exe pad-focus <has foreground> <steam in front> <on tv> <on desk>`, each 0 or 1:
+    // exits with the Act, 254 on bad arguments.
+    public static int Cli(string[] args) {
+        if (args.Length != 5) return 254;
+        var b = new bool[4];
+        for (int i = 0; i < 4; i++) {
+            if (args[i + 1] == "1") b[i] = true;
+            else if (args[i + 1] != "0") return 254;
+        }
+        return (int)Plan(b[0], b[1], b[2], b[3]);
+    }
+}
+
 static class Pad {
     // Report id plus three button bytes, Home and Capture masked off (Home opens Steam's menu), or
     // null for a report that carries no buttons this reads.
@@ -858,6 +886,7 @@ static class Program {
         if (mode == "app-exit") return AppExit.Cli(args);
         if (mode == "wait-out-kodi") return KodiLauncher.WaitOutCli(args);
         if (mode == "pad-press") return Pad.Cli(args);
+        if (mode == "pad-focus") return PadFocus.Cli(args);
         if (mode == "tv-seat") return TvSeat.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "desk-primary") return DeskPrimary.Cli(args);
@@ -1512,8 +1541,10 @@ class Helper : Form {
         if (!pressed || (DateTime.Now - lastPadFocus).TotalSeconds < 1.5) return;
         // Already using something on the TV - leave it alone. A Steam window counts as the TV
         // unless it sits on the desk (the ordinary Steam client there must not keep the controller).
-        if (SteamInFront() && !FocusIsOnDesk()) return;
-        if (FocusIsOnTv()) {
+        // A press while no window has focus is mid-switch (PadFocus): leave it to whoever switches.
+        var act = PadFocus.Plan(N.GetForegroundWindow() != IntPtr.Zero, SteamInFront(), FocusIsOnTv(), FocusIsOnDesk());
+        if (act == PadFocus.Act.Leave) return;
+        if (act == PadFocus.Act.Uncover) {
             // ... except a window covered by another of ours: focus the one on top (Uncovered).
             var tv = Tv(); if (tv == null) return;
             var centre = new N.POINT { X = tv.Bounds.X + tv.Bounds.Width / 2, Y = tv.Bounds.Y + tv.Bounds.Height / 2 };
