@@ -84,6 +84,17 @@ repos:
       - id: check-added-large-files
         stages: [pre-commit]
 
+  # --- this project's own -----------------------------------------------------
+  # The repository names no game (CLAUDE.md). Delivery is direct, so the PR gate finds a
+  # name only after it is on main; this stops it at the commit. The guard is stdlib only.
+  - repo: local
+    hooks:
+      - id: no-game-names
+        name: the repository names no game
+        entry: python tests/test_no_game_names.py
+        language: python
+        types: [text]
+
   # --- secrets ----------------------------------------------------------------
   # This is the hook `scripts/hooks/stop.py` defers to when it passes `--no-secrets`:
   # secrets scanning belongs at commit time, not on every agent turn, where it would churn
