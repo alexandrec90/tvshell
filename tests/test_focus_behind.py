@@ -19,9 +19,15 @@ COVERS = (
     "Uncovered.Cli",
     "PadFocus.Plan",
     "PadFocus.Cli",
+    "PadFocus.Pick",
+    "PadFocus.TargetCli",
+    "PadFocus.UsedLast",
+    "PadFocus.UsedLastCli",
     "mode:focus-landed",
     "mode:uncovered",
     "mode:pad-focus",
+    "mode:pad-target",
+    "mode:pad-used-last",
 )
 
 YES, NO, USAGE = 1, 0, 254
@@ -106,3 +112,50 @@ def test_a_press_takes_focus_only_from_the_desk(exe, has_foreground, steam, on_t
 @pytest.mark.parametrize("args", [(), ("1", "0", "0"), ("1", "0", "0", "2"), ("1", "0", "0", "1", "1")])
 def test_pad_focus_usage(exe, args):
     assert run(exe, "pad-focus", *args) == USAGE
+
+
+NO_TARGET, TO_GAME, TO_APP, TO_BIG_PICTURE = 0, 1, 2, 3  # PadFocus.Target
+
+
+@pytest.mark.parametrize(
+    ("game", "game_on_tv", "app", "app_used_last", "expected", "why"),
+    [
+        # Regression: watching Kodi with the game on the TV behind it, focus wandered to the
+        # desk (the game's store launcher, the taskbar) and the next press handed it to the game,
+        # which covered Kodi; its covered-video guard then stopped the channel.
+        ("1", "1", "1", "1", TO_APP, "back to the TV app that was being used"),
+        ("1", "1", "1", "0", TO_GAME, "back to the game that was being played"),
+        ("1", "1", "0", "1", TO_GAME, "the TV app used last has closed"),
+        ("0", "0", "1", "0", TO_APP, "only a TV app"),
+        ("1", "0", "1", "0", TO_APP, "the game is on the desk"),
+        ("1", "0", "0", "0", NO_TARGET, "only the game, on the desk: focus stays"),
+        ("0", "0", "0", "1", TO_BIG_PICTURE, "nothing running"),
+    ],
+)
+def test_a_press_from_the_desk_returns_to_what_was_used_on_the_tv(
+    exe, game, game_on_tv, app, app_used_last, expected, why
+):
+    assert run(exe, "pad-target", game, game_on_tv, app, app_used_last) == expected, why
+
+
+@pytest.mark.parametrize("args", [(), ("1", "1", "1"), ("1", "1", "1", "x")])
+def test_pad_target_usage(exe, args):
+    assert run(exe, "pad-target", *args) == USAGE
+
+
+@pytest.mark.parametrize(
+    ("is_game", "is_app", "before", "expected", "why"),
+    [
+        ("1", "0", "1", NO, "the game took focus"),
+        ("0", "1", "0", YES, "a TV app took focus"),
+        ("0", "0", "1", YES, "a desk window (Battle.net, the taskbar) changes nothing"),
+        ("0", "0", "0", NO, "nor here"),
+    ],
+)
+def test_which_was_used_last(exe, is_game, is_app, before, expected, why):
+    assert run(exe, "pad-used-last", is_game, is_app, before) == expected, why
+
+
+@pytest.mark.parametrize("args", [(), ("1", "0"), ("1", "0", "2")])
+def test_pad_used_last_usage(exe, args):
+    assert run(exe, "pad-used-last", *args) == USAGE
