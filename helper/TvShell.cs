@@ -651,6 +651,160 @@ static class PadFocus {
     }
 }
 
+// The desk display goes to standby when nobody is at the desk, even while the TV plays. Windows'
+// own monitor timeout never fires then: Kodi, YouTube or a game holds "display required", which
+// keeps every display lit. Who holds it cannot be read without admin rights (CallNtPowerInformation's
+// execution state shows only the caller's own requests), so the hold is inferred from its effect:
+// the power plan's monitor timeout has passed, by Grace, with no keyboard, mouse or controller
+// input, and Windows still reports the displays on (GUID_CONSOLE_DISPLAY_STATE, DisplayOn). The
+// desk monitor is then switched to standby over DDC/CI (VCP 0xD6, dxva2.dll) and back on at the
+// next input. Windows' display layout is never touched: removing the desk from it would move
+// windows and reset the TV's fullscreen apps. DDC standby does not change what Windows reports,
+// so DisplayOn stays on while the desk is blanked.
+// Open question: once, a Dell U2412M left in DDC standby for three hours (the signal cut by
+// Windows for 2.5 of them, then live for 30 minutes while Kodi played) reported itself on after
+// the wake but showed no picture until its power button was pressed. Short reproductions of each
+// part (a signal cut while in standby, a wake sent the instant Windows restores the signal) all
+// recovered, so what stranded it is not known yet.
+static class DeskBlank {
+    public enum Act { Leave = 0, Off = 1, On = 2 }
+    public const int PowerOn = 1, PowerStandby = 4;   // VCP 0xD6 values; 5 (hard off) needs the button
+    public const double Grace = 30;   // seconds past the timeout before a still-lit display means a hold
+    public static bool Enabled = true, Blanked = false;
+    public static volatile bool DisplayOn = true;   // Windows' console display state; on at start
+    public static DateTime LastPad = DateTime.MinValue;
+    static bool ddcWarned = false;
+
+    // Pure. `idle`: seconds since the last keyboard, mouse or controller input; `timeout`: the power
+    // plan's monitor timeout in seconds (0 = never); `blanked`: the desk is in our DDC standby;
+    // `displayOn`: Windows reports the displays on; `gameOnDesk`: a game is the focused window on
+    // the desk. Off only when Windows should have turned the displays off by now and has not.
+    public static Act Plan(double idle, double timeout, bool blanked, bool displayOn, bool gameOnDesk) {
+        if (blanked) return idle < timeout || timeout <= 0 ? Act.On : Act.Leave;   // someone is back (or the setting changed)
+        if (timeout <= 0 || !displayOn || gameOnDesk) return Act.Leave;
+        return idle >= timeout + Grace ? Act.Off : Act.Leave;
+    }
+
+    // Pure: is this process a game? The game from game.cfg, or anything Steam installed (every
+    // Steam game lives under steamapps\common; the Steam client itself does not).
+    public static bool IsGame(string path, string name, string configured) {
+        if (configured.Length > 0 && string.Equals(name ?? "", configured, StringComparison.OrdinalIgnoreCase)) return true;
+        return (path ?? "").IndexOf(@"\steamapps\common\", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    // Carries out an Act through `power` (-1 reads VCP 0xD6, any other value sets it: 1 for done,
+    // -1 for failure). Returns whether the desk is in our standby afterwards. A wake counts only
+    // once the monitor reads back as on: right after Windows wakes its displays the DDC bus can
+    // refuse a command, so an unconfirmed wake stays "blanked" and is retried on the next tick.
+    public static bool Step(Act act, bool blanked, Func<int, int> power) {
+        if (act == Act.Off) {
+            if (power(PowerStandby) == 1) { Cfg.Log("desk idle and the displays held on -> desk monitor to standby"); return true; }
+            if (!ddcWarned) { ddcWarned = true; Cfg.Warn("desk monitor refused DDC/CI standby: it stays on while the TV plays"); }
+            return false;
+        }
+        if (act == Act.On) {
+            power(PowerOn);
+            if (power(-1) != PowerOn) return true;
+            Cfg.Log("input at the desk -> desk monitor back on");
+            return false;
+        }
+        return blanked;
+    }
+
+    // `TvShell.exe desk-blank plan <idle s> <timeout s> <blanked> <display on> <game on desk>` (0/1): exits with the Act.
+    // `TvShell.exe desk-blank game <path|-> <name> <configured game|->`: exits 1 for a game, 0 not.
+    // `TvShell.exe desk-blank display-state <n>`: exits 1 when Windows' display state n means on.
+    // `TvShell.exe desk-blank step <act> <blanked> <reply>...`: Step against scripted DDC replies,
+    //     one per call, the last repeating; exits 1 when the desk is left in standby, 0 when not.
+    // `TvShell.exe desk-blank read`: the live inputs, read-only; prints them, exits 0 when the desk
+    //     monitor answered DDC/CI, 255 when it did not.
+    // All exit 254 on bad arguments.
+    public static int Cli(string[] args) {
+        if (args.Length == 7 && args[1] == "plan") {
+            double idle, timeout;
+            if (!double.TryParse(args[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out idle)
+                || !double.TryParse(args[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out timeout)) return 254;
+            var b = new bool[3];
+            for (int i = 0; i < 3; i++) { if (args[i + 4] == "1") b[i] = true; else if (args[i + 4] != "0") return 254; }
+            return (int)Plan(idle, timeout, b[0], b[1], b[2]);
+        }
+        if (args.Length == 5 && args[1] == "game")
+            return IsGame(args[2] == "-" ? "" : args[2], args[3], args[4] == "-" ? "" : args[4]) ? 1 : 0;
+        uint ds;
+        if (args.Length == 3 && args[1] == "display-state" && uint.TryParse(args[2], out ds)) return IsOn(ds) ? 1 : 0;
+        if (args.Length >= 5 && args[1] == "step") {
+            int act; int[] replies;
+            if (!int.TryParse(args[2], out act) || act < 0 || act > 2 || (args[3] != "0" && args[3] != "1")) return 254;
+            try { replies = args.Skip(4).Select(int.Parse).ToArray(); } catch (Exception) { return 254; }
+            int next = 0;
+            return Step((Act)act, args[3] == "1", v => replies[Math.Min(next++, replies.Length - 1)]) ? 1 : 0;
+        }
+        if (args.Length == 2 && args[1] == "read") {
+            int state = Power(-1);
+            Console.WriteLine("power=" + state + " timeout=" + TimeoutSeconds() + " idle=" + Math.Round(IdleSeconds()));
+            return state < 0 ? 255 : 0;
+        }
+        return 254;
+    }
+
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(N.POINT p, uint flags);
+    [DllImport("dxva2.dll")] static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr hMon, out uint n);
+    [DllImport("dxva2.dll")] static extern bool GetPhysicalMonitorsFromHMONITOR(IntPtr hMon, uint n, [Out] PHYSICAL_MONITOR[] arr);
+    [DllImport("dxva2.dll")] static extern bool DestroyPhysicalMonitor(IntPtr h);
+    [DllImport("dxva2.dll")] static extern bool GetVCPFeatureAndVCPFeatureReply(IntPtr h, byte code, IntPtr type, out uint cur, out uint max);
+    [DllImport("dxva2.dll")] static extern bool SetVCPFeature(IntPtr h, byte code, uint value);
+    [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO li);
+    [DllImport("user32.dll")] public static extern IntPtr RegisterPowerSettingNotification(IntPtr recipient, ref Guid setting, uint flags);
+    [DllImport("powrprof.dll")] static extern uint PowerGetActiveScheme(IntPtr root, out IntPtr scheme);
+    [DllImport("powrprof.dll")] static extern uint PowerReadACValueIndex(IntPtr root, IntPtr scheme, ref Guid sub, ref Guid setting, out uint value);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr h);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct PHYSICAL_MONITOR {
+        public IntPtr Handle;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Description;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct LASTINPUTINFO { public uint Size, Time; }
+
+    // VCP 0xD6 on the desk (primary) monitor: value -1 reads it, any other sets it (1 done). -1 on failure.
+    public static int Power(int value) {
+        var mon = MonitorFromPoint(new N.POINT(), 1 /*MONITOR_DEFAULTTOPRIMARY*/);
+        uint n;
+        if (mon == IntPtr.Zero || !GetNumberOfPhysicalMonitorsFromHMONITOR(mon, out n) || n == 0) return -1;
+        var arr = new PHYSICAL_MONITOR[n];
+        if (!GetPhysicalMonitorsFromHMONITOR(mon, n, arr)) return -1;
+        try {
+            if (value >= 0) return SetVCPFeature(arr[0].Handle, 0xD6, (uint)value) ? 1 : -1;
+            uint cur, max;
+            return GetVCPFeatureAndVCPFeatureReply(arr[0].Handle, 0xD6, IntPtr.Zero, out cur, out max) ? (int)cur : -1;
+        } finally { foreach (var m in arr) DestroyPhysicalMonitor(m.Handle); }
+    }
+
+    public static Guid ConsoleDisplayState = new Guid("6fe69556-704a-47a0-8f24-c28d936fda47");
+
+    // Pure: the display state a PBT_POWERSETTINGCHANGE carries, as DisplayOn. 0 is off, 1 on and 2
+    // dimmed: dimmed is Windows' own timeout under way, not a hold, so it is not "on".
+    public static bool IsOn(uint state) { return state == 1; }
+
+    // The active power plan's monitor timeout on mains power, in seconds; 0 = never (or unreadable).
+    public static int TimeoutSeconds() {
+        IntPtr scheme;
+        if (PowerGetActiveScheme(IntPtr.Zero, out scheme) != 0) return 0;
+        try {
+            var sub = new Guid("7516b95f-f776-4464-8c53-06167f40cc99");      // GUID_VIDEO_SUBGROUP
+            var setting = new Guid("3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e");  // VIDEOIDLE
+            uint v;
+            return PowerReadACValueIndex(IntPtr.Zero, scheme, ref sub, ref setting, out v) == 0 ? (int)v : 0;
+        } finally { LocalFree(scheme); }
+    }
+
+    // Seconds since the last keyboard or mouse input, or controller press (LastPad): Windows'
+    // idle clock does not see a controller.
+    public static double IdleSeconds() {
+        var li = new LASTINPUTINFO { Size = 8 };
+        double kbm = GetLastInputInfo(ref li) ? unchecked((uint)Environment.TickCount - li.Time) / 1000.0 : 0;
+        return Math.Min(kbm, (DateTime.Now - LastPad).TotalSeconds);
+    }
+}
+
 static class Pad {
     // Report id plus three button bytes, Home and Capture masked off (Home opens Steam's menu), or
     // null for a report that carries no buttons this reads.
@@ -933,6 +1087,7 @@ static class Program {
         if (mode == "pad-target") return PadFocus.TargetCli(args);
         if (mode == "pad-used-last") return PadFocus.UsedLastCli(args);
         if (mode == "tv-seat") return TvSeat.Cli(args);
+        if (mode == "desk-blank") return DeskBlank.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "desk-primary") return DeskPrimary.Cli(args);
         if (mode == "launch") return Launcher.Run();
@@ -1393,8 +1548,13 @@ class Helper : Form {
         miDeskWin = new ToolStripMenuItem("Keep desk windows off the TV", null, (s, e) => {
             keepDeskOffTv = !keepDeskOffTv; miDeskWin.Checked = keepDeskOffTv; deskMoves.Clear();
         }) { Checked = true };
+        // Off: the next tick wakes the desk if it is in standby (DeskBlank.Plan with no timeout).
+        var miDeskOff = new ToolStripMenuItem("Desk monitor off when idle while the TV plays", null, (s, e) => {
+            DeskBlank.Enabled = !DeskBlank.Enabled; ((ToolStripMenuItem)s).Checked = DeskBlank.Enabled;
+            Cfg.Log("desk monitor standby while the TV plays -> " + (DeskBlank.Enabled ? "on" : "off"));
+        }) { Checked = true };
         if (Game.Configured) menu.Items.AddRange(new ToolStripItem[] { miTv, miDesk, new ToolStripSeparator() });
-        menu.Items.AddRange(new ToolStripItem[] { miBp, miMouse, miDeskWin,
+        menu.Items.AddRange(new ToolStripItem[] { miBp, miMouse, miDeskWin, miDeskOff,
             new ToolStripMenuItem("Open log", null, (s, e) => { try { Process.Start("notepad.exe", Cfg.LogFile); } catch { } }),
             new ToolStripSeparator(), new ToolStripMenuItem("Exit", null, (s, e) => Close()) });
         Icon ico = SystemIcons.Application;
@@ -1438,7 +1598,12 @@ class Helper : Form {
 
     static string DisplayList() { return TvDisplay.List(); }
     void OnDisplays(object s, EventArgs e) { Cfg.Log("displays changed: " + DisplayList()); }
-    void OnPower(object s, Microsoft.Win32.PowerModeChangedEventArgs e) { Cfg.Log("power: " + e.Mode); }
+    // A desk monitor in DDC standby is woken before sleep (DeskBlank): after resume nothing would
+    // know to wake it.
+    void OnPower(object s, Microsoft.Win32.PowerModeChangedEventArgs e) {
+        Cfg.Log("power: " + e.Mode);
+        if (e.Mode == Microsoft.Win32.PowerModes.Suspend && DeskBlank.Blanked) { DeskBlank.Power(DeskBlank.PowerOn); DeskBlank.Blanked = false; Cfg.Log("sleep -> desk monitor woken first"); }
+    }
     void OnSession(object s, Microsoft.Win32.SessionSwitchEventArgs e) { Cfg.Log("session: " + e.Reason); }
 
     IntPtr fgHook = IntPtr.Zero; N.WinEventProc fgHookProc;   // held in a field, like keyHookProc
@@ -1588,6 +1753,7 @@ class Helper : Form {
         if (Pad.Buttons(rep) == null) return;
         bool pressed = Pad.Pressed(padReport, rep);
         padReport = rep;   // kept current while the presses are keys, so no stale report reads as a press later
+        if (pressed) DeskBlank.LastPad = DateTime.Now;   // Windows' idle clock does not see a controller
         if (asKeys) return;
         if (!pressed || (DateTime.Now - lastPadFocus).TotalSeconds < 1.5) return;
         // Already using something on the TV - leave it alone. A Steam window counts as the TV
@@ -1672,9 +1838,20 @@ class Helper : Form {
             new N.RAWINPUTDEVICE { UsagePage = 1, Usage = 4, Flags = 0x100, Target = Handle } };
         if (!N.RegisterRawInputDevices(devs, 2, (uint)Marshal.SizeOf(typeof(N.RAWINPUTDEVICE))))
             Cfg.Error("raw input registration failed (error " + Marshal.GetLastWin32Error() + "): a controller press will not focus the TV");
+        // WM_POWERBROADCAST whenever the displays go on, off or dim; Windows sends the current state at once.
+        if (DeskBlank.RegisterPowerSettingNotification(Handle, ref DeskBlank.ConsoleDisplayState, 0 /*DEVICE_NOTIFY_WINDOW_HANDLE*/) == IntPtr.Zero) Cfg.Warn("display-state notifications unavailable: the desk monitor will not go to standby while the TV plays");
     }
     protected override void WndProc(ref Message m) {
         if (m.Msg == 0x312 && m.WParam.ToInt32() == HOTKEY) SetTarget(gameScreen == "tv" ? "desk" : "tv", true);
+        // WM_POWERBROADCAST / PBT_POWERSETTINGCHANGE: POWERBROADCAST_SETTING is the setting's GUID
+        // (16 bytes), the data length, then the data - here the display state (DeskBlank.IsOn).
+        if (m.Msg == 0x218 && m.WParam.ToInt32() == 0x8013) {
+            try {
+                bool on = DeskBlank.IsOn((uint)Marshal.ReadInt32(m.LParam, 20));
+                if (on != DeskBlank.DisplayOn) Cfg.Log("Windows turned the displays " + (on ? "on" : "off or dimmed"));
+                DeskBlank.DisplayOn = on;
+            } catch (Exception ex) { Fault("display state", ex); }
+        }
         if (m.Msg == 0x00FF) {  // WM_INPUT
             try {
                 uint hdr = (uint)(8 + 2 * IntPtr.Size), size = 0;
@@ -1705,6 +1882,7 @@ class Helper : Form {
         Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPower;
         Microsoft.Win32.SystemEvents.SessionSwitch -= OnSession;
         Cfg.Log("helper closing (Exit from the tray menu)");
+        if (DeskBlank.Blanked) { DeskBlank.Power(DeskBlank.PowerOn); DeskBlank.Blanked = false; }   // never leave the desk dark behind us
         var all = new N.RECT { L = -32000, T = -32000, R = 32000, B = 32000 }; N.ClipCursor(ref all);
         tray.Visible = false; tray.Dispose(); base.OnFormClosed(e);
         Application.Exit();
@@ -1983,6 +2161,21 @@ class Helper : Form {
     }
 
     void Tick() {
+        // --- the desk monitor while the TV plays (DeskBlank) --- first, and on its own: a fault
+        // here must not stop the rest of the tick, nor the rest of the tick stop a wake.
+        try {
+            if (DeskBlank.Enabled || DeskBlank.Blanked) {
+                double idle = DeskBlank.IdleSeconds(), timeout = DeskBlank.Enabled ? DeskBlank.TimeoutSeconds() : 0;
+                bool on = DeskBlank.DisplayOn, gameOnDesk = false;
+                if (!DeskBlank.Blanked && on && timeout > 0 && idle >= timeout + DeskBlank.Grace && FocusIsOnDesk()) {
+                    uint pid; N.GetWindowThreadProcessId(N.GetForegroundWindow(), out pid);
+                    try { using (var p = Process.GetProcessById((int)pid)) { string path = ""; try { path = p.MainModule.FileName; } catch { } gameOnDesk = DeskBlank.IsGame(path, p.ProcessName, Game.Process); } } catch { }
+                }
+                var act = DeskBlank.Plan(idle, timeout, DeskBlank.Blanked, on, gameOnDesk);
+                DeskBlank.Blanked = DeskBlank.Step(act, DeskBlank.Blanked, DeskBlank.Power);
+            }
+        } catch (Exception ex) { Fault("desk blank", ex); }
+
         DeskPrimary.Ensure();  // before anything is placed: the TV as primary display means "no TV"
         var tv = Tv();
         tvBounds = tv == null ? Rectangle.Empty : tv.Bounds;

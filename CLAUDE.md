@@ -111,6 +111,17 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
   tray toggle turns that off, and a window that refuses the move or keeps returning
   is left alone after three tries.
 
+- **The desk monitor sleeps while the TV plays** (`DeskBlank`). A playing app holds
+  "display required", so Windows' monitor timeout never fires. Who holds it cannot be read
+  without admin (the execution state shows only the caller's own requests), so a hold is
+  inferred: the timeout has passed by 30 s with no keyboard, mouse or controller input and
+  Windows still reports the displays on. The desk monitor then goes to DDC/CI standby and
+  wakes at the next input; the display layout is never touched. **Open question:** once,
+  the Dell U2412M left in standby for three hours reported itself on after the wake but
+  showed no picture until its power button was pressed. Short reproductions all recovered,
+  so the cause is unknown; if it recurs, replace standby with brightness 0 and a black
+  window, which never changes the monitor's power state.
+
 It also re-applies two patches to third-party Kodi add-ons on every start, because an
 add-on update overwrites them (`EnsureAddonPatches`): SlyGuy's bandwidth cap accepting
 decimals, and a browser User-Agent for CBC Radio, whose server stalls Python's default
