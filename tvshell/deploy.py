@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import hashlib
+import importlib
 import os
 import shutil
 import subprocess
@@ -98,14 +99,36 @@ def csc_command(csc: Path, source: Path, output: Path) -> list[str]:
     ]
 
 
-def tests_command(report: Path) -> list[str]:
-    """The pytest run that judges a built helper. Pure.
+def tests_python(repo: Path) -> str:
+    """The interpreter the helper tests run under: this one when it has pytest, else `repo`'s.
+
+    `python -m tvshell.deploy` from a bare `claude --worktree` tree runs the machine's
+    Python, which has no pytest, so every deploy from one reported its tests FAILED with
+    none run (e20a01a4). The vendored `scripts/hooks/toolchain.py` answers that as it does
+    for `scripts/run-tests.py`: the tree's `.venv`, provisioned with this project's own
+    install command when it is missing. Where that copy is absent or cannot provision,
+    this interpreter is the answer, and the log names why the run failed.
+    """
+    hooks = repo / "scripts" / "hooks"
+    if not (hooks / "toolchain.py").is_file():
+        return sys.executable
+    if str(hooks) not in sys.path:
+        sys.path.insert(0, str(hooks))
+    try:
+        target = importlib.import_module("toolchain").rerun_target(repo, "pytest")
+    except (ImportError, AttributeError):
+        return sys.executable
+    return str(target) if target is not None else sys.executable
+
+
+def tests_command(report: Path, python: str = sys.executable) -> list[str]:
+    """The pytest run that judges a built helper, under `python`. Pure.
 
     `-m` comes after `addopts`, so it replaces their `not local`. pytest exits 5 when it
     collected nothing, so a run of no test is red, not a pass.
     """
     return [
-        sys.executable,
+        python,
         "-m",
         "pytest",
         str(REPO / "tests"),
@@ -131,7 +154,7 @@ def start_tests(built: Path) -> subprocess.Popen[bytes]:
     with (logs / "deploy-tests.log").open("wb") as out:
         # The child holds its own handle to the log, so closing ours here is safe.
         return subprocess.Popen(  # noqa: S603 - our own interpreter running our own tests
-            tests_command(logs / "deploy-tests.xml"),
+            tests_command(logs / "deploy-tests.xml", tests_python(REPO)),
             cwd=REPO,
             env={**os.environ, TEST_EXE_ENV: str(built)},
             stdout=out,
