@@ -125,20 +125,27 @@ jobs:
     # tests/conftest.py puts on every test that runs the built exe, and the same selection
     # `python -m tvshell.deploy` runs beside an install. It reports; delivery is `direct`
     # (.devkit.toml), so it holds no merge back.
+    #
+    # Its steps run for a pull request only. On the default branch the `E2E` job below
+    # runs these same tests (every `helper` test is `ci_e2e` too), so running them here as
+    # well would take a second Windows runner for the same verdict.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
       - uses: ./.github/actions/setup-python-env
+        if: github.event_name == 'pull_request'
         with:
           # Explicit at every call site: the action is copied from devkit verbatim
           # rather than rendered, so its own default cannot know this project's version.
           python-version: "3.12"
       - name: Helper tests
+        if: github.event_name == 'pull_request'
         # pytest exits 5 when it collected nothing, so a selection that matches no test
         # fails the job rather than passing on zero tests.
         run: uv run python -m pytest tests -m helper -q --tb=short -rfE --junit-xml=logs/junit-helper.xml
       - name: Upload helper test artifact
-        if: failure()
+        if: failure() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: helper-test-failures
@@ -177,3 +184,42 @@ jobs:
         env:
           DEVKIT_DIR: ${{ github.workspace }}/.devkit-src
         run: python scripts/sync-devkit.py --check
+
+  e2e:
+    name: E2E
+    # The default branch only: PRs merge without waiting for a gate, so a PR run of this
+    # would decide nothing. After the drift job, whatever it said, so a push run does not
+    # take one more runner at once. A burst of merges collapses to the newest commit; the
+    # older run's conclusion is then `cancelled`, which the fix trigger reads as no verdict
+    # rather than a red. A red here is a red `PR Gate` on the default branch, which is what
+    # the fix pass reads.
+    needs: devkit-drift
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    # Windows: the `ci_e2e` tier builds the helper with .NET Framework's csc.exe and runs
+    # it, which only a Windows runner has. `scripts/e2e.py --ci` never installs it.
+    runs-on: windows-latest
+    concurrency:
+      group: ${{ github.workflow }}-e2e-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # What devkit's scheduler sets: under it a skip in the tier is a failure.
+      DEVKIT_E2E: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "3.12"
+      - name: End-to-end tier
+        shell: bash
+        run: uv run python scripts/e2e.py --ci
+      - name: Upload e2e artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-failures
+          path: |
+            logs/e2e-junit.xml
+            logs/build-helper.log
+          if-no-files-found: ignore

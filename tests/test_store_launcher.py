@@ -18,7 +18,7 @@ import pytest
 
 from tvshell import deploy
 
-pytestmark = pytest.mark.local
+pytestmark = pytest.mark.ci_e2e
 
 # What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
 COVERS = (

@@ -36,12 +36,14 @@ testpaths = ["tests/"]
 # No `-q` in `addopts`: an agent adds its own, and `-qq` drops the "N passed" line.
 # `-p devkit_temproot` is the vendored plugin giving each run a temp root of its own, so a
 # run elsewhere on the machine cannot fail this one at exit; `pythonpath` is where it lives.
-# `local` is deselected here and selected by `scripts/e2e.py`, nightly, on this PC: those
-# tests need the Windows C# compiler a CI runner does not have.
-addopts = '-m "not local" -p devkit_temproot'
+# Both end-to-end tiers are deselected here, so the plain suite stays fast and runs on
+# Linux: `local` (this PC and its TV) is selected by `scripts/e2e.py`, nightly, on this PC;
+# `ci_e2e` (Windows and its C# compiler) by `scripts/e2e.py --ci`, in PR Gate's E2E job.
+addopts = '-m "not local and not ci_e2e" -p devkit_temproot'
 pythonpath = ["scripts/pytest-plugins"]
 markers = [
-  "local: needs this workstation, not a runner; deselected by addopts, run nightly by scripts/e2e.py",
+  "local: needs this workstation (its TV, its logs, the installed helper), not a runner; deselected by addopts, run nightly by scripts/e2e.py",
+  "ci_e2e: needs Windows and the .NET Framework C# compiler a windows-latest runner has; deselected by addopts, run by scripts/e2e.py --ci in PR Gate's E2E job",
   "helper: runs the built helper exe; set by tests/conftest.py on every test that uses the exe fixture, selected by the deploy gate and the CI helper job",
 ]
 

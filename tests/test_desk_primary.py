@@ -12,7 +12,9 @@ primary one. The cases run through the exe's ``plan-primary`` mode, whose exit c
 index of the display to make primary (255 = leave the displays alone).
 
 The last test is the same question asked of this PC's real displays, through the installed
-helper's read-only ``desk-primary check``.
+helper's read-only ``desk-primary check``: it alone is ``local``, since a runner has neither
+this PC's TV nor an installed helper. The others build the helper from this checkout and
+are ``ci_e2e`` (``tests/conftest.py``).
 """
 
 from __future__ import annotations
@@ -32,8 +34,6 @@ OTHER = r"\\?\DISPLAY#OTH9999#5&1&0&UID4360#{e6f07b5f}"
 BOTH = "ADP0001,TVX1234"
 LEAVE = 255
 DESK_IS_PRIMARY, TV_IS_PRIMARY = 0, 3
-
-pytestmark = pytest.mark.local
 
 # What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
 # The last four are reached by the read-only check of this PC's real displays.
@@ -94,6 +94,7 @@ def test_an_unknown_mode_starts_nothing(exe):
     assert done.returncode == 253
 
 
+@pytest.mark.local
 def test_the_tv_is_not_this_pcs_primary_display():
     """This PC's real displays, read (never changed) by the installed helper."""
     installed = INSTALL_DIR / "TvShell.exe"

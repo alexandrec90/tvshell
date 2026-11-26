@@ -480,7 +480,7 @@ def test_build_without_compiler(monkeypatch, tmp_path):
         deploy.build(tmp_path / "out.exe")
 
 
-@pytest.mark.local
+@pytest.mark.ci_e2e
 def test_helper_source_compiles(tmp_path, monkeypatch):
     if deploy.find_csc() is None:
         pytest.fail(

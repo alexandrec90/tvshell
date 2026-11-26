@@ -18,7 +18,7 @@ import pytest
 IGNORE, PASS, HOLD = 0, 1, 2
 INJECTED, LOWER_IL_INJECTED, EXTENDED = 0x10, 0x02, 0x01
 
-pytestmark = pytest.mark.local
+pytestmark = pytest.mark.ci_e2e
 
 # What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
 COVERS = ("DeskKeys.Classify", "DeskKeys.Cli", "mode:desk-key")

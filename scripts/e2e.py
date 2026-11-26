@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""The local end-to-end tier: every test that needs this workstation, not a runner.
+"""The end-to-end tiers: `local` on this workstation, `ci_e2e` on a hosted Windows runner.
 
 The contract `.claude/rules/local-e2e.md` states, which devkit's nightly `devkit-local-e2e`
 job runs in this checkout: exit 0 green, anything else red, each failure printed as a
-`FAILED <id>` line. It runs the tests marked `local`, which `addopts` deselects from every
-other run, because they need this PC: the .NET Framework C# compiler that builds the
-helper (`helper/TvShell.cs`) exists on Windows only, and the runtime health check
-(`tvshell/health.py`) reads this PC's own logs and crash events.
+`FAILED <id>` line. With no flag it runs the tests marked `local`, which need this PC and
+its TV: the runtime health check (`tvshell/health.py`) reads this PC's own logs and crash
+events, and the installed helper reads this PC's real displays.
 
-**A skip is a failure under the scheduler** (`DEVKIT_E2E` set): the checkout is the one
-the tests were written for, so nothing has a reason left to skip. By hand a skip is listed
-and does not fail the run by itself.
+`--ci` runs the tests marked `ci_e2e` instead, with the same contract: what needs only
+Windows and the .NET Framework C# compiler a `windows-latest` runner has, which is every
+test that builds or runs the helper (`helper/TvShell.cs`). `PR Gate`'s `E2E` job runs it on
+the default branch with `DEVKIT_E2E` set, and it never installs anything. `addopts`
+deselects both markers from every other run.
+
+**A skip is a failure under the scheduler** (`DEVKIT_E2E` set, as CI sets it too): the
+machine is the one the tests were written for, so nothing has a reason left to skip. By
+hand a skip is listed and does not fail the run by itself.
 
 **A run that executed nothing is red**, whoever ran it: a green from zero tests is a skip
 reported as a pass.
@@ -30,14 +35,15 @@ fixes another branch merged, and a merge by itself installs nothing: five merged
 once sat uninstalled for a day while the crash one of them prevents kept happening. After
 the tests, not before, because the health check reads only what the installed build did.
 Only in the checkout itself with `helper/` as on `origin/main`: never from a worktree, where a
-fixer runs this same script on work in progress.
+fixer runs this same script on work in progress, and never under `--ci`.
 
 Stdlib only, for `.claude/rules/task-scripts.md`'s reason: the caller may be the machine's
 Python, not this project's. The junit report stays in `logs/e2e-junit.xml`.
 
 Usage:
-    python scripts/e2e.py                                           # the whole tier
-    python scripts/e2e.py tests/test_deploy.py::test_helper_source_compiles
+    python scripts/e2e.py                                           # the whole local tier
+    python scripts/e2e.py --ci                                      # the whole CI tier
+    python scripts/e2e.py --ci tests/test_deploy.py::test_helper_source_compiles
 """
 
 from __future__ import annotations
@@ -56,6 +62,8 @@ REPORT = REPO_ROOT / "logs" / "e2e-junit.xml"
 # Spelled as devkit's `e2e-pass.ENV_FLAG` spells it.
 ENV_FLAG = "DEVKIT_E2E"
 MARKER = "local"
+CI_MARKER = "ci_e2e"
+CI_FLAG = "--ci"
 # uv's switch for "run in the environment as it stands".
 NO_SYNC = "UV_NO_SYNC"
 
@@ -113,7 +121,9 @@ def _first_line(message: str) -> str:
     return message.strip().splitlines()[0] if message.strip() else "no reason given"
 
 
-def verdict(code: int, found: Sequence[Case], strict: bool) -> tuple[int, list[str]]:
+def verdict(
+    code: int, found: Sequence[Case], strict: bool, marker: str = MARKER
+) -> tuple[int, list[str]]:
     """`(exit code, lines to print)` for pytest's `code` and the cases it reported. Pure."""
     skips = [case for case in found if case.outcome == SKIPPED]
     ran = [case for case in found if case.outcome != SKIPPED]
@@ -121,7 +131,7 @@ def verdict(code: int, found: Sequence[Case], strict: bool) -> tuple[int, list[s
     word = "FAILED" if strict else "SKIPPED"
     lines += [f"{word} {c.ident} - skipped: {_first_line(c.message)}" for c in skips]
     if not ran:
-        lines.append(f"e2e: no {MARKER} test executed, which is not a pass")
+        lines.append(f"e2e: no {marker} test executed, which is not a pass")
         return (code or 1), lines
     if strict and skips:
         lines.append(f"e2e: {len(skips)} test(s) skipped under the scheduled run")
@@ -129,8 +139,14 @@ def verdict(code: int, found: Sequence[Case], strict: bool) -> tuple[int, list[s
     return code, lines
 
 
-def pytest_argv(report: Path, named: Sequence[str] = ()) -> list[str]:
-    """The argv to run. Pure. `-m` comes after `addopts`, so it replaces their `not local`."""
+def split_flag(argv: Sequence[str]) -> tuple[str, list[str]]:
+    """`(marker, the remaining ids)` for this script's arguments. Pure."""
+    named = [arg for arg in argv if arg != CI_FLAG]
+    return (CI_MARKER if len(named) < len(argv) else MARKER), named
+
+
+def pytest_argv(report: Path, named: Sequence[str] = (), marker: str = MARKER) -> list[str]:
+    """The argv to run. Pure. `-m` comes after `addopts`, so it replaces their deselection."""
     return [
         "uv",
         "run",
@@ -142,7 +158,7 @@ def pytest_argv(report: Path, named: Sequence[str] = ()) -> list[str]:
         "pytest",
         *(named or ["tests"]),
         "-m",
-        MARKER,
+        marker,
         "--tb=short",
         "-q",
         "-rfE",
@@ -183,13 +199,19 @@ INSTALL_ARGV = [
 
 
 def installs_merged(
-    root: Path, named: Sequence[str], strict: bool, runner: Callable[..., object]
+    root: Path,
+    named: Sequence[str],
+    strict: bool,
+    runner: Callable[..., object],
+    marker: str = MARKER,
 ) -> bool:
     """Whether this run is the nightly one, in the checkout itself, with the merged helper.
 
-    A worktree's `.git` is a file, so a fixer's run on a branch never installs.
+    A worktree's `.git` is a file, so a fixer's run on a branch never installs. The CI
+    tier never does: a runner's checkout is a directory with `.git` in it too, and has
+    no TV to install to.
     """
-    if not strict or named or not (root / ".git").is_dir():
+    if marker != MARKER or not strict or named or not (root / ".git").is_dir():
         return False
     diff = runner(
         ["git", "diff", "--quiet", "origin/main", "--", "helper"],
@@ -211,13 +233,13 @@ def main(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     env: Mapping[str, str] = os.environ,
 ) -> int:
-    named = sys.argv[1:] if argv is None else argv
+    marker, named = split_flag(sys.argv[1:] if argv is None else argv)
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.unlink(missing_ok=True)
     # Captured and re-printed rather than inherited: a window-less child that captures
     # nothing writes to its hidden console, not to the pipe the pass reads.
     done = runner(
-        pytest_argv(REPORT, named),
+        pytest_argv(REPORT, named, marker),
         cwd=REPO_ROOT,
         env=run_env(env, REPO_ROOT),
         capture_output=True,
@@ -229,8 +251,8 @@ def main(
     print(_printable(done.stdout or ""), end="", flush=True)
     print(_printable(done.stderr or ""), end="", file=sys.stderr, flush=True)
     strict = bool(env.get(ENV_FLAG))
-    code, lines = verdict(done.returncode, cases(REPORT), strict)
-    if installs_merged(REPO_ROOT, named, strict, runner):
+    code, lines = verdict(done.returncode, cases(REPORT), strict, marker)
+    if installs_merged(REPO_ROOT, named, strict, runner, marker):
         deployed = runner(
             INSTALL_ARGV,
             cwd=REPO_ROOT,

@@ -20,7 +20,7 @@ PROFILE = r"C:\Users\someone\TvShell\yt-profile"
 STAYS, GOES = 1, 0
 BAD = 254
 
-pytestmark = pytest.mark.local
+pytestmark = pytest.mark.ci_e2e
 
 # What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
 COVERS = (

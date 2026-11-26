@@ -39,12 +39,14 @@ def exe(tmp_path_factory) -> Path:
 def pytest_collection_modifyitems(items) -> None:
     """A test that runs the built helper is a ``helper`` test, whatever its file says.
 
-    ``helper`` is what the deploy and the CI job select, so a test of the helper cannot
-    be left out of them by forgetting a marker. It is ``local`` too, which keeps it out of
-    the plain suite: that one runs where there is no C# compiler. First, so the ``-m``
-    selection sees the markers.
+    ``helper`` is what the deploy and the CI ``helper`` job select, so a test of the helper
+    cannot be left out of them by forgetting a marker. It is ``ci_e2e`` too, which keeps it
+    out of the plain suite (that one runs on Linux, where there is no C# compiler) and puts
+    it in the CI end-to-end tier, which a ``windows-latest`` runner runs: building and
+    running the helper needs Windows and csc.exe, nothing of this PC's. First, so the
+    ``-m`` selection sees the markers.
     """
     for item in items:
         if "exe" in getattr(item, "fixturenames", ()):
             item.add_marker(pytest.mark.helper)
-            item.add_marker(pytest.mark.local)
+            item.add_marker(pytest.mark.ci_e2e)

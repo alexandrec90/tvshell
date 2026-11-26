@@ -90,6 +90,31 @@ def test_pytest_argv_selects_marker_after_addopts():
     assert argv[-1] == "--junitxml=r.xml"
 
 
+def test_pytest_argv_selects_the_marker_it_is_given():
+    argv = e2e.pytest_argv(Path("r.xml"), marker="ci_e2e")
+    assert argv[argv.index("ci_e2e") - 1] == "-m"
+    assert "local" not in argv
+
+
+@pytest.mark.parametrize(
+    ("argv", "marker", "named"),
+    [
+        ([], "local", []),
+        (["--ci"], "ci_e2e", []),
+        (["--ci", "tests/test_x.py::test_y"], "ci_e2e", ["tests/test_x.py::test_y"]),
+        (["tests/test_x.py::test_y", "--ci"], "ci_e2e", ["tests/test_x.py::test_y"]),
+        (["tests/test_x.py::test_y"], "local", ["tests/test_x.py::test_y"]),
+    ],
+)
+def test_split_flag_picks_the_tier_and_keeps_the_ids(argv, marker, named):
+    assert e2e.split_flag(argv) == (marker, named)
+
+
+def test_verdict_names_the_tier_that_executed_nothing():
+    _, lines = e2e.verdict(5, [], strict=True, marker="ci_e2e")
+    assert "no ci_e2e test executed" in lines[-1]
+
+
 def test_a_tree_with_no_venv_runs_without_the_sessions_no_sync(tmp_path):
     """A devkit session's `UV_NO_SYNC` reached a run in a tree with no `.venv`: `uv run`
     made an empty one, installed nothing, and the run ended `No module named pytest`."""
@@ -152,6 +177,44 @@ def test_no_other_run_installs_anything(checkout, why):
     env = {} if why == "by hand" else {e2e.ENV_FLAG: "1"}
     assert e2e.main(named, runner=runs, env=env) == 0
     assert e2e.INSTALL_ARGV not in runs.calls
+
+
+def test_the_ci_tier_runs_its_marker_and_never_installs(checkout):
+    """A runner's checkout has a `.git` directory and runs under `DEVKIT_E2E`, the two
+    things the nightly install looks for: `--ci` alone must keep it from deploying."""
+    runs = Runs()
+    assert e2e.main(["--ci"], runner=runs, env={e2e.ENV_FLAG: "1"}) == 0
+    assert e2e.INSTALL_ARGV not in runs.calls
+    assert not [call for call in runs.calls if call[0] == "git"]
+    pytest_call = runs.calls[0]
+    assert pytest_call[pytest_call.index("ci_e2e") - 1] == "-m"
+    assert "--ci" not in pytest_call
+
+
+def test_installs_merged_is_false_for_the_ci_tier(checkout):
+    runs = Runs()
+    assert not e2e.installs_merged(checkout, [], True, runs, marker=e2e.CI_MARKER)
+    assert runs.calls == []
+
+
+def test_the_ci_tier_keeps_the_contract(checkout, capsys):
+    def failing(argv, **_kwargs):
+        write_report(
+            e2e.REPORT,
+            '<testcase classname="tests.test_x" name="test_ok"/>'
+            '<testcase classname="tests.test_x" name="test_s"><skipped message="no csc"/></testcase>',
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    assert e2e.main(["--ci"], runner=failing, env={e2e.ENV_FLAG: "1"}) == 1
+    assert "FAILED tests/test_x.py::test_s - skipped: no csc" in capsys.readouterr().out
+
+    def empty(argv, **_kwargs):
+        write_report(e2e.REPORT, "")
+        return subprocess.CompletedProcess(argv, 5, stdout="", stderr="")
+
+    assert e2e.main(["--ci"], runner=empty, env={e2e.ENV_FLAG: "1"}) == 5
+    assert "no ci_e2e test executed" in capsys.readouterr().out
 
 
 def test_main_runs_pytest_and_reports(tmp_path, monkeypatch, capsys):
