@@ -105,11 +105,15 @@ LEAVE, UNCOVER, TAKE_TO_TV = 0, 1, 2  # PadFocus.Act
         ("1", "0", "0", "0", LEAVE, "a window off both displays is not the desk's to give"),
     ],
 )
-def test_a_press_takes_focus_only_from_the_desk(exe, has_foreground, steam, on_tv, on_desk, expected, why):
+def test_a_press_takes_focus_only_from_the_desk(
+    exe, has_foreground, steam, on_tv, on_desk, expected, why
+):
     assert run(exe, "pad-focus", has_foreground, steam, on_tv, on_desk) == expected, why
 
 
-@pytest.mark.parametrize("args", [(), ("1", "0", "0"), ("1", "0", "0", "2"), ("1", "0", "0", "1", "1")])
+@pytest.mark.parametrize(
+    "args", [(), ("1", "0", "0"), ("1", "0", "0", "2"), ("1", "0", "0", "1", "1")]
+)
 def test_pad_focus_usage(exe, args):
     assert run(exe, "pad-focus", *args) == USAGE
 
