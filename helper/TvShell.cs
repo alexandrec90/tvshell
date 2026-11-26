@@ -1558,6 +1558,10 @@ class Helper : Form {
             return;
         }
         lastPadFocus = DateTime.Now;
+        // Which window the press took focus from, and where it sat: switching from the game to
+        // Live TV in Steam's overlay reaches this branch although the game had focus on the TV.
+        var from = N.GetForegroundWindow();
+        var fromText = Describe(from) + " at " + N.Rect(from);
         RememberDeskWindow();
         IntPtr target = IntPtr.Zero;
         var game = GameWindow();
@@ -1568,7 +1572,7 @@ class Helper : Form {
         else { var bp = BigPictureWindows(); if (bp.Count > 0) target = bp[0]; }
         if (target != IntPtr.Zero && N.GetForegroundWindow() != target) {
             var what = target == game ? "game" : target == kodi ? "TV app" : "Big Picture";
-            if (N.Focus(target)) Cfg.Log("controller press -> focused " + what);
+            if (N.Focus(target)) Cfg.Log("controller press -> focused " + what + " (focus was with " + fromText + ")");
             else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> Windows refused to focus " + what + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
         }
     }
