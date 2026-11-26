@@ -43,7 +43,12 @@ def run(exe: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def plan(
-    exe: Path, idle: float, blanked: bool, display_on: bool, game_on_desk: bool = False, timeout: int = TIMEOUT
+    exe: Path,
+    idle: float,
+    blanked: bool,
+    display_on: bool,
+    game_on_desk: bool = False,
+    timeout: int = TIMEOUT,
 ) -> int:
     flags = [str(int(b)) for b in (blanked, display_on, game_on_desk)]
     return run(exe, "plan", str(idle), str(timeout), *flags).returncode
@@ -133,7 +138,10 @@ def test_step(exe, act, blanked, replies, left_blanked):
     assert run(exe, "step", str(act), str(blanked), *replies).returncode == left_blanked
 
 
-@pytest.mark.parametrize("args", [("step", "3", "0", "1"), ("step", "1", "2", "1"), ("step", "1", "0", "x"), ("step", "1", "0")])
+@pytest.mark.parametrize(
+    "args",
+    [("step", "3", "0", "1"), ("step", "1", "2", "1"), ("step", "1", "0", "x"), ("step", "1", "0")],
+)
 def test_step_bad_arguments(exe, args):
     assert run(exe, *args).returncode == BAD
 
@@ -147,9 +155,12 @@ def test_read_reports_the_live_inputs(exe):
     found = re.fullmatch(r"power=(-?\d+) timeout=(\d+) idle=(\d+)", done.stdout.strip())
     assert found, done.stdout
     assert (done.returncode == 0) == (1 <= int(found.group(1)) <= 5)
-    query = subprocess.run(  # noqa: S603, S607 - Windows' own powercfg, read-only
+    query = subprocess.run(
         ["powercfg", "/q", "SCHEME_CURRENT", "SUB_VIDEO", "VIDEOIDLE"],
-        capture_output=True, text=True, check=True, timeout=30,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
     )
     ac = re.search(r"Current AC Power Setting Index: 0x([0-9a-fA-F]+)", query.stdout)
     assert ac, query.stdout
