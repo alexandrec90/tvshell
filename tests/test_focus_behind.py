@@ -1,8 +1,9 @@
-"""Focus that lands late, and focus on a window hidden behind another of ours.
+"""Focus that lands late, focus on a window hidden behind another of ours, and what a
+controller press does to focus.
 
 ``N.Landed`` runs through the exe's ``focus-landed`` mode against a scripted foreground,
-and ``Uncovered.Plan`` through ``uncovered``. Window handles are plain numbers; 0 is no
-window.
+``Uncovered.Plan`` through ``uncovered`` and ``PadFocus.Plan`` through ``pad-focus``.
+Window handles are plain numbers; 0 is no window.
 """
 
 from __future__ import annotations
@@ -16,8 +17,11 @@ COVERS = (
     "N.LandedCli",
     "Uncovered.Plan",
     "Uncovered.Cli",
+    "PadFocus.Plan",
+    "PadFocus.Cli",
     "mode:focus-landed",
     "mode:uncovered",
+    "mode:pad-focus",
 )
 
 YES, NO, USAGE = 1, 0, 254
@@ -74,3 +78,31 @@ def test_uncovered_usage(exe, args):
 def test_no_foreground_window_and_no_game_is_not_a_covered_game(exe):
     # With no game its handle is 0, and so is "no foreground window".
     assert run(exe, "uncovered", "0", "0", "0", APP) == NO
+
+
+LEAVE, UNCOVER, TAKE_TO_TV = 0, 1, 2  # PadFocus.Act
+
+
+@pytest.mark.parametrize(
+    ("has_foreground", "steam", "on_tv", "on_desk", "expected", "why"),
+    [
+        # Regression: Steam's overlay switching from the game to Live TV leaves no window focused
+        # for a moment, and no window reads as on the desk (its empty rectangle sits at 0,0).
+        # Taking focus for the game then hid Steam's menu, which kept the controller, behind it.
+        ("0", "0", "0", "1", LEAVE, "mid-switch, though its rectangle is on the desk"),
+        ("0", "0", "0", "0", LEAVE, "mid-switch"),
+        ("1", "0", "0", "1", TAKE_TO_TV, "a desk window has focus"),
+        ("1", "0", "1", "0", UNCOVER, "something on the TV has focus"),
+        ("1", "1", "1", "0", LEAVE, "Steam's menu on the TV is in use"),
+        ("1", "1", "0", "0", LEAVE, "Steam's window off both displays"),
+        ("1", "1", "0", "1", TAKE_TO_TV, "the ordinary Steam client on the desk"),
+        ("1", "0", "0", "0", LEAVE, "a window off both displays is not the desk's to give"),
+    ],
+)
+def test_a_press_takes_focus_only_from_the_desk(exe, has_foreground, steam, on_tv, on_desk, expected, why):
+    assert run(exe, "pad-focus", has_foreground, steam, on_tv, on_desk) == expected, why
+
+
+@pytest.mark.parametrize("args", [(), ("1", "0", "0"), ("1", "0", "0", "2"), ("1", "0", "0", "1", "1")])
+def test_pad_focus_usage(exe, args):
+    assert run(exe, "pad-focus", *args) == USAGE
