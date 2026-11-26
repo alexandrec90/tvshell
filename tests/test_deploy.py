@@ -2,6 +2,7 @@ import datetime as dt
 import re
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -352,6 +353,54 @@ def test_tests_command_selects_the_helper_tests_after_addopts(tmp_path):
     assert argv.index("helper") > argv.index("pytest")
     assert str(deploy.REPO / "tests") in argv
     assert argv[-1] == f"--junitxml={tmp_path / 'r.xml'}"
+
+
+def test_tests_command_runs_under_the_interpreter_it_is_given(tmp_path):
+    argv = deploy.tests_command(tmp_path / "r.xml", "venv-python")
+    assert argv[:3] == ["venv-python", "-m", "pytest"]
+
+
+def _vendored_toolchain(monkeypatch, repo, answer):
+    """A `repo` holding a vendored toolchain whose `rerun_target` answers `answer`."""
+    hooks = repo / "scripts" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "toolchain.py").write_text("", encoding="utf-8")
+    asked = []
+
+    def rerun_target(root, module):
+        asked.append((root, module))
+        return answer
+
+    monkeypatch.setitem(sys.modules, "toolchain", types.SimpleNamespace(rerun_target=rerun_target))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    return asked
+
+
+def test_tests_python_is_the_trees_venv_when_this_interpreter_has_no_pytest(monkeypatch, tmp_path):
+    """e20a01a4: a deploy from a bare `claude --worktree` tree ran its tests under the
+    machine's Python, which has no pytest, and reported FAILED with no test run."""
+    venv = tmp_path / ".venv" / "Scripts" / "python.exe"
+    asked = _vendored_toolchain(monkeypatch, tmp_path, venv)
+    assert deploy.tests_python(tmp_path) == str(venv)
+    assert asked == [(tmp_path, "pytest")]
+
+
+def test_tests_python_stays_here_when_the_toolchain_says_so(monkeypatch, tmp_path):
+    _vendored_toolchain(monkeypatch, tmp_path, None)
+    assert deploy.tests_python(tmp_path) == sys.executable
+
+
+def test_tests_python_stays_here_without_a_vendored_toolchain(tmp_path):
+    assert deploy.tests_python(tmp_path) == sys.executable
+
+
+def test_start_tests_runs_under_the_trees_venv(monkeypatch, tmp_path):
+    monkeypatch.setattr(deploy, "REPO", tmp_path)
+    _vendored_toolchain(monkeypatch, tmp_path, tmp_path / "venv-python")
+    seen = {}
+    monkeypatch.setattr(deploy.subprocess, "Popen", lambda argv, **_: seen.update(argv=argv))
+    deploy.start_tests(tmp_path / "TvShell.exe")
+    assert seen["argv"][0] == str(tmp_path / "venv-python")
 
 
 def test_start_tests_judges_the_built_exe_without_waiting(monkeypatch, tmp_path):
