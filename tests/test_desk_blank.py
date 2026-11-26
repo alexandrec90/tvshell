@@ -9,6 +9,7 @@ The cases run through the exe's ``desk-blank`` mode, whose exit code is the answ
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -19,6 +20,8 @@ LEAVE, OFF, ON = 0, 1, 2
 BAD = 254
 TIMEOUT = 600  # the power plan's 10-minute monitor timeout
 GRACE = 30
+# Windows' own powercfg by absolute path, never whatever "powercfg" PATH resolves to (S607).
+POWERCFG = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "powercfg.exe")
 
 pytestmark = pytest.mark.local
 
@@ -155,8 +158,8 @@ def test_read_reports_the_live_inputs(exe):
     found = re.fullmatch(r"power=(-?\d+) timeout=(\d+) idle=(\d+)", done.stdout.strip())
     assert found, done.stdout
     assert (done.returncode == 0) == (1 <= int(found.group(1)) <= 5)
-    query = subprocess.run(
-        ["powercfg", "/q", "SCHEME_CURRENT", "SUB_VIDEO", "VIDEOIDLE"],
+    query = subprocess.run(  # noqa: S603 - Windows' powercfg by absolute path, fixed arguments
+        [POWERCFG, "/q", "SCHEME_CURRENT", "SUB_VIDEO", "VIDEOIDLE"],
         capture_output=True,
         text=True,
         check=True,
