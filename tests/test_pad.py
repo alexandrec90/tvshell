@@ -17,7 +17,7 @@ import pytest
 PRESS, NONE, BAD = 1, 0, 254
 CENTRED = "000880" * 2  # both 12-bit sticks at 2048
 
-pytestmark = pytest.mark.local
+pytestmark = pytest.mark.ci_e2e
 
 # What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
 COVERS = ("Pad.Buttons", "Pad.Pressed", "Pad.Hex", "Pad.Cli", "mode:pad-press")

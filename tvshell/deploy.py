@@ -124,7 +124,7 @@ def tests_python(repo: Path) -> str:
 def tests_command(report: Path, python: str = sys.executable) -> list[str]:
     """The pytest run that judges a built helper, under `python`. Pure.
 
-    `-m` comes after `addopts`, so it replaces their `not local`. pytest exits 5 when it
+    `-m` comes after `addopts`, so it replaces their deselection. pytest exits 5 when it
     collected nothing, so a run of no test is red, not a pass.
     """
     return [

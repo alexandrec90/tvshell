@@ -20,7 +20,7 @@ code, tests, docs or commit messages.
 | --- | --- |
 | The helper | C#, one file (`helper/TvShell.cs`), built by .NET Framework's `csc.exe` |
 | Tooling | Python 3.12, standard library only (`tvshell/`) |
-| Tests | pytest; the `local` tier (`scripts/e2e.py`) compiles the helper |
+| Tests | pytest; the `ci_e2e` tier (`scripts/e2e.py --ci`, on a Windows runner) compiles and runs the helper |
 | Lint | ruff, mypy |
 
 ## Two places: the source and the install
@@ -159,7 +159,8 @@ python -m tvshell.steam_shortcuts --vdf <Steam userdata/<id>/config/shortcuts.vd
 python -m tvshell.kodi install <addon id>   # Kodi running; answers its prompts
 python -m tvshell.slyguy set max_bandwidth 0.7   # Kodi closed
 python -m tvshell.health                    # the TV's last 24 h: crashes, errors, focus
-python scripts/e2e.py                       # the local tier: the helper compiles, the TV is healthy
+python scripts/e2e.py                       # the local tier: the TV is healthy, the desk is primary
+python scripts/e2e.py --ci                  # the CI tier: the helper compiles and its tests pass
 ```
 
 ## Tooling
@@ -210,14 +211,18 @@ here is a fork that will disagree with it the first time either is edited.
 - **No test touches the real Steam, Kodi or Windows.** Kodi's sockets are faked with a
   local TCP/UDP server on port 0 (`tests/test_kodi.py`); Steam's file and SlyGuy's
   database live in `tmp_path`; process listing and `taskkill` are monkeypatched.
-- **`local` marks what needs this PC**: compiling the helper with `csc.exe`, and the
-  runtime health check against the real logs and event log. `addopts` deselects it;
-  `scripts/e2e.py` runs it.
+- **`local` marks what needs this PC**: the runtime health check against the real logs
+  and event log, and the installed helper's read of the real displays. `addopts`
+  deselects it; `scripts/e2e.py` runs it.
+- **`ci_e2e` marks what needs only Windows and `csc.exe`**: compiling the helper and every
+  test that runs it, which a `windows-latest` runner has. `addopts` deselects it;
+  `scripts/e2e.py --ci` runs it, in the `E2E` job of `.github/workflows/pr-gate.yml` on
+  the default branch.
 - **A helper decision is tested through a mode of the exe.** The decision is a pure
   static function (`TvDisplay.Pick`, `DeskPrimary.Plan`), a mode runs it from the command
   line (`pick-tv`, `plan-primary`), and a test passes cases to the built exe through the
   `exe` fixture and reads the exit code. `tests/conftest.py` marks every such test
-  `helper`.
+  `helper` and `ci_e2e`.
 - **No test holds a fix back; every deploy says what it broke.** The owner's rule: a
   fix goes onto the TV at once, and testing and repairing happen beside it. So
   `python -m tvshell.deploy` installs as soon as the helper compiles, with every
@@ -228,7 +233,8 @@ here is a fork that will disagree with it the first time either is edited.
   primary display, no ERROR since it started, and the **display drill**, which makes
   the TV primary for real and requires the running helper to restore the exact layout.
   A red is exit 1 with the new helper in place, and the next thing to fix. The `helper`
-  job in `.github/workflows/pr-gate.yml` runs the same tests on a Windows runner.
+  job in `.github/workflows/pr-gate.yml` runs the same tests on a Windows runner for a
+  pull request; on the default branch the `E2E` job runs them, with the rest of `ci_e2e`.
 - **Every helper function has a test or is on a list that only shrinks.**
   `tests/test_helper_coverage.py` reads `helper/TvShell.cs` in the plain suite: each
   method and mode must be named in the `COVERS` tuple of a test module that runs the

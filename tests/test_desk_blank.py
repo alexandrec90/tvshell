@@ -23,7 +23,7 @@ GRACE = 30
 # Windows' own powercfg by absolute path, never whatever "powercfg" PATH resolves to (S607).
 POWERCFG = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "powercfg.exe")
 
-pytestmark = pytest.mark.local
+pytestmark = pytest.mark.ci_e2e
 
 # What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
 COVERS = (

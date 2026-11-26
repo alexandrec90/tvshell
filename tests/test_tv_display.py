@@ -19,7 +19,7 @@ DESK = r"\\?\DISPLAY#DSK0001#5&1&0&UID4359#{e6f07b5f}"
 OTHER = r"\\?\DISPLAY#OTH9999#5&1&0&UID4360#{e6f07b5f}"
 NONE = 255
 
-pytestmark = pytest.mark.local
+pytestmark = pytest.mark.ci_e2e
 
 # What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
 COVERS = ("TvDisplay.Pick", "TvDisplay.Matches", "TvDisplay.Cli", "mode:pick-tv")
