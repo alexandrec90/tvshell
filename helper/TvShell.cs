@@ -1814,7 +1814,10 @@ class Helper : Form {
     readonly List<TvApp> tvApps = new List<TvApp> {
         // Kodi runs windowed (its own monitor switching is unreliable): strip the border and make its
         // drawing area exactly cover the TV, so it renders full-screen there.
-        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, StopVideoWhenCovered = true, CrashLog = Cfg.KodiLog, ExitedLine = Cfg.KodiExitedLine },
+        // StopVideoWhenCovered is off by the owner's choice (2026-11-25): a programme playing behind
+        // the game is listened to, and stopping it cut that off. Covered video can crash Kodi 21.3;
+        // the health check reports each crash. Setting it back to true restores the guard.
+        new TvApp { Name = "Kodi", Find = KodiWindow, Borderless = true, StopVideoWhenCovered = false, CrashLog = Cfg.KodiLog, ExitedLine = Cfg.KodiExitedLine },
         // BackWhenTV's app opens borderless full-screen on the primary display: same treatment.
         new TvApp { Name = "BackWhenTV app", Find = BackWhenApp.Window, Borderless = true },
     }.Concat(WebApp.All.Select(a => new TvApp { Name = a.Name, Find = a.Window, Borderless = false })).ToList();
