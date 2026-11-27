@@ -70,7 +70,11 @@ def pressed(exe: Path, *args: str) -> int:
         (full(sticks="000880" + "FF0F80"), full(sticks="000880" + "FF0F80"), NONE),  # right stick
         (full(sticks="FF0F80" + "000880"), full(), NONE),  # let go
         (full(sticks="FF0F80" + "000880"), full(sticks="FF0FF0" + "000880"), PRESS),  # and up too
-        (full(sticks="FF0F80" + "000880"), full(sticks="FF0F80" + "FF0F80"), PRESS),  # the other stick
+        (
+            full(sticks="FF0F80" + "000880"),
+            full(sticks="FF0F80" + "FF0F80"),
+            PRESS,
+        ),  # the other stick
         (simple(), full(sticks="FF0F80" + "000880"), PRESS),  # pushed as the format switches
         # nothing to compare with yet, and reports without buttons
         ("-", full(right=0x08), NONE),

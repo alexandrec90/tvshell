@@ -39,6 +39,8 @@ def test_home_leaves_the_windows_alone(exe, args, why):
     assert steam_menu(exe, *args) == LEAVE, why
 
 
-@pytest.mark.parametrize("args", [(), ("1", "1", KODI), ("2", "1", KODI, GAME), ("1", "1", "x", GAME)])
+@pytest.mark.parametrize(
+    "args", [(), ("1", "1", KODI), ("2", "1", KODI, GAME), ("1", "1", "x", GAME)]
+)
 def test_steam_menu_usage(exe, args):
     assert steam_menu(exe, *args) == USAGE
