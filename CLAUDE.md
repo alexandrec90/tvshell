@@ -151,7 +151,8 @@ screenshots before changing the helper**; a fix from tvshell.log alone is a gues
 **Marks.** Minus and Plus held together for two seconds on the controller, or "Mark a
 problem on the TV now" in the tray, copies a screenshot, the last screenshots and the tails
 of the trace, this log and Kodi's to `marks/<time>/`, which nothing prunes, and logs an
-ERROR naming that folder. Start a fix there.
+ERROR naming that folder. A taken mark plays Windows' `tada.wav` and shows a green banner
+for four seconds (`Cue`): on the TV, or on the desk for the tray. Start a fix there.
 
 `tvshell/health.py` reads all of that, plus the Windows Application log's crash events,
 and the `local` tier runs it nightly (`tests/test_health.py`), one test per kind of

@@ -1119,6 +1119,62 @@ static class Mark {
     }
 }
 
+// That a mark was taken, where the person is: a chime and a banner across the top of the TV for a
+// few seconds. Without them, holding Minus and Plus did nothing anyone could see, and the person
+// could not tell a mark taken from one missed. The banner never takes focus (the controller must
+// stay with what it drives), lets clicks and WindowFromPoint through, and sits clear of the TV's
+// centre, which Uncovered reads; it is the helper's own window, so TvSeat leaves it on the TV.
+static class Cue {
+    public static readonly string Chime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"Media\tada.wav");
+
+    sealed class Banner : Form {
+        protected override bool ShowWithoutActivation { get { return true; } }
+        protected override CreateParams CreateParams {
+            get {
+                var p = base.CreateParams;
+                p.ExStyle |= 0x8 /*TOPMOST*/ | 0x80 /*TOOLWINDOW*/ | 0x20 /*TRANSPARENT*/ | 0x80000 /*LAYERED*/ | 0x08000000 /*NOACTIVATE*/;
+                return p;
+            }
+        }
+    }
+
+    // Shows the banner on `screen` and closes it after `ms`; returns it, already shown.
+    public static Form Show(Rectangle screen, string text, int ms) {
+        int h = Math.Max(60, screen.Height / 7);
+        var f = new Banner {
+            FormBorderStyle = FormBorderStyle.None, ShowInTaskbar = false, TopMost = true, StartPosition = FormStartPosition.Manual,
+            BackColor = Color.FromArgb(20, 110, 60), Opacity = 0.92,
+            Bounds = new Rectangle(screen.X, screen.Y + screen.Height / 12, screen.Width, h),
+        };
+        f.Controls.Add(new Label {
+            Text = text, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.White,
+            Font = new Font("Segoe UI", Math.Max(12, h / 3), FontStyle.Bold, GraphicsUnit.Pixel),
+        });
+        var t = new System.Windows.Forms.Timer { Interval = Math.Max(1, ms) };
+        t.Tick += (s, e) => { t.Stop(); t.Dispose(); f.Close(); };
+        f.Show();
+        t.Start();
+        return f;
+    }
+
+    // Plays `wav` without waiting; false when it cannot (no file, no audio device).
+    public static bool Sound(string wav) {
+        try { var p = new System.Media.SoundPlayer(wav); p.Load(); p.Play(); return true; } catch (Exception) { return false; }
+    }
+
+    // `TvShell.exe cue <x> <y> <w> <h> <ms> <wav|-> <text>`: shows the banner for `ms`, playing `wav`
+    // first unless "-"; exits 0, 3 when the sound could not play, 254 on bad arguments.
+    public static int Cli(string[] args) {
+        if (args.Length != 8) return 254;
+        int[] n;
+        try { n = args.Skip(1).Take(5).Select(int.Parse).ToArray(); } catch (Exception) { return 254; }
+        if (n[2] <= 0 || n[3] <= 0 || n[4] < 0) return 254;
+        bool played = args[6] == "-" || Sound(args[6]);
+        Application.Run(Show(new Rectangle(n[0], n[1], n[2], n[3]), args[7], n[4]));
+        return played ? 0 : 3;
+    }
+}
+
 // Who holds UDP ports. Windows' System log has recorded "all ephemeral UDP ports in use" (Tcpip
 // 4266) once or twice a day for weeks, and an online game drops its connection when that
 // happens; between spikes there are a few dozen endpoints, so a look afterwards names nobody.
@@ -1397,6 +1453,7 @@ static class Program {
         if (mode == "tv-shot") return Shots.Cli(args);
         if (mode == "mark") return Mark.Cli(args);
         if (mode == "udp-owners") return Ports.Cli(args);
+        if (mode == "cue") return Cue.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "desk-primary") return DeskPrimary.Cli(args);
         if (mode == "launch") return Launcher.Run();
@@ -2088,6 +2145,11 @@ class Helper : Form {
                 if (!PadNames.IsMark(held)) { markHeldSince = DateTime.MinValue; markTaken = false; }
                 else if (markHeldSince == DateTime.MinValue) markHeldSince = DateTime.Now;
             }
+            // Checked on every report too: a full report comes many times a second, so two
+            // seconds held is two seconds, not up to three as on the tick alone.
+            if (markHeldSince != DateTime.MinValue && !markTaken && DateTime.Now - markHeldSince >= TimeSpan.FromSeconds(2)) {
+                markTaken = true; markWanted = "Minus and Plus held on the controller";
+            }
         }
         bool asKeys = PadToKeys(rep);
         if (Pad.Buttons(rep) == null) return;
@@ -2575,6 +2637,11 @@ class Helper : Form {
                 var dest = Mark.Now(Mark.Dir, Shots.Dir, Mark.ShotsKept, Mark.Tail, why,
                     new[] { Trace.Old, Trace.Current, Cfg.LogFile, Cfg.KodiLog }, tvNow == null ? Rectangle.Empty : tvNow.Bounds);
                 Cfg.Error("problem marked on the TV (" + why + "): the screenshots and the last of the trace and logs are in " + dest);
+                // The cue: a chime, and the banner where the person is - the TV for the
+                // controller, the desk for the tray menu.
+                if (!Cue.Sound(Cue.Chime)) Cfg.Warn("mark taken, but its chime could not play (" + Cue.Chime + ")");
+                var cueOn = why == "the tray menu" || tvNow == null ? Desk().Bounds : tvNow.Bounds;
+                Cue.Show(cueOn, "Problem marked. The last few minutes are saved for the fix.", 4000);
             }
             if ((DateTime.Now - lastUdpCount).TotalSeconds >= 5) {
                 lastUdpCount = DateTime.Now;

@@ -38,6 +38,10 @@ COVERS = (
     "Ports.UdpOwners",
     "Ports.Describe",
     "Ports.Cli",
+    "Cue.Show",
+    "Cue.Sound",
+    "Cue.Cli",
+    "mode:cue",
     "mode:trace",
     "mode:pad-names",
     "mode:tv-view",
@@ -247,6 +251,43 @@ def test_a_mark_takes_a_screenshot_of_the_tv_first(exe, tmp_path):
 @pytest.mark.parametrize("args", [(), ("m", "s", "x", "8", "0", "0", "0", "0", "why"), ("m", "s", "3", "8", "0", "0", "w", "0", "why")])
 def test_mark_usage(exe, args):
     assert run(exe, "mark", *args)[0] == USAGE
+
+
+# --- the cue that a mark was taken ---
+
+
+def silent_wav(path: Path) -> Path:
+    """A valid 50 ms WAV of silence: plays without a sound on a PC with speakers."""
+    rate, frames = 8000, 400
+    data = b"\x00\x00" * frames
+    fmt = (1).to_bytes(2, "little") + (1).to_bytes(2, "little") + rate.to_bytes(4, "little")
+    fmt += (rate * 2).to_bytes(4, "little") + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
+    body = b"WAVE" + b"fmt " + len(fmt).to_bytes(4, "little") + fmt + b"data" + len(data).to_bytes(4, "little") + data
+    path.write_bytes(b"RIFF" + len(body).to_bytes(4, "little") + body)
+    return path
+
+
+def test_the_banner_shows_and_closes_itself(exe):
+    # Regression: a mark showed nothing, so the person could not tell it was taken.
+    assert run(exe, "cue", "0", "0", "640", "480", "300", "-", "Problem marked")[0] == 0
+
+
+def test_the_chime_plays_a_wav(exe, tmp_path):
+    code = run(exe, "cue", "0", "0", "640", "480", "100", str(silent_wav(tmp_path / "s.wav")), "x")[0]
+    # 3 only where there is no audio device at all (a CI runner may have none)
+    assert code in (0, 3)
+
+
+def test_a_missing_chime_is_reported_not_a_crash(exe, tmp_path):
+    assert run(exe, "cue", "0", "0", "640", "480", "50", str(tmp_path / "none.wav"), "x")[0] == 3
+
+
+@pytest.mark.parametrize(
+    "args",
+    [(), ("0", "0", "640", "480", "50", "-"), ("0", "0", "0", "480", "50", "-", "x"), ("0", "0", "640", "480", "soon", "-", "x")],
+)
+def test_cue_usage(exe, args):
+    assert run(exe, "cue", *args)[0] == USAGE
 
 
 # --- UDP ports ---
