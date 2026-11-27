@@ -137,6 +137,22 @@ so a "lost focus" has a culprit; every TV app's exit is logged with its exit cod
 crash is an ERROR, and Kodi's own log is copied to `crashes/` before its next start
 overwrites it.
 
+**The trace is the evidence behind the story** (`trace.log` beside it, 32 MB, rotated to
+`trace.old.log`). Each line is written when something changes: what the controller holds
+(`pad`, Home included), every press with what the helper decided and why (`press`, never
+silent), every focus change with how late its event came (`focus`), what the TV shows
+(`tv`: focus, the window on top, whether the picture is black, every window over the TV
+front first), and UDP endpoint owners (`udp`). Presses and TV changes save a half-size
+screenshot to `tv-shots/` (the newest 1500), and the trace line names the file. Look at
+the screenshots: Steam's menu is drawn inside the window under it, so window data says
+Kodi is on top while the TV shows Steam's menu. **Diagnose from the trace and the
+screenshots before changing the helper**; a fix from tvshell.log alone is a guess.
+
+**Marks.** Minus and Plus held together for two seconds on the controller, or "Mark a
+problem on the TV now" in the tray, copies a screenshot, the last screenshots and the tails
+of the trace, this log and Kodi's to `marks/<time>/`, which nothing prunes, and logs an
+ERROR naming that folder. Start a fix there.
+
 `tvshell/health.py` reads all of that, plus the Windows Application log's crash events,
 and the `local` tier runs it nightly (`tests/test_health.py`), one test per kind of
 problem: a crash, an ERROR line, Windows refusing most focus changes, the helper not

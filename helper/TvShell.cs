@@ -861,13 +861,302 @@ static class Pad {
         return Pressed(prev, rep) ? 1 : 0;
     }
 
-    static byte[] Hex(string s) {
+    public static byte[] Hex(string s) {
         if (s.Length % 2 != 0) return null;
         var b = new byte[s.Length / 2];
         for (int i = 0; i < b.Length; i++)
             if (!byte.TryParse(s.Substring(i * 2, 2), System.Globalization.NumberStyles.HexNumber, null, out b[i])) return null;
         return b;
     }
+}
+
+// The trace, `trace.log` beside tvshell.log: what the controller sent, what each press made the
+// helper do and why, every focus change, and what the TV showed, each written when it changes.
+// tvshell.log is the story and the health check's contract; this is the evidence behind it, for
+// whoever has to find out why the couch got stuck. Nothing reads it automatically. It names desk
+// windows by process only, like tvshell.log: their titles are the person's business.
+static class Trace {
+    public static string Dir = Cfg.Dir;
+    public static long Max = 32L * 1024 * 1024;
+    static readonly object gate = new object();
+    public static string Current { get { return Path.Combine(Dir, "trace.log"); } }
+    public static string Old { get { return Path.Combine(Dir, "trace.old.log"); } }
+
+    // `yyyy-MM-dd HH:mm:ss.fff kind message`, one line; rotated to trace.old.log past Max.
+    public static void Write(string kind, string m) {
+        var line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + kind.PadRight(5) + " "
+            + (m ?? "").Replace("\r", "").Replace("\n", " | ") + Environment.NewLine;
+        lock (gate) {
+            for (int i = 0; i < 5; i++) {
+                try {
+                    Directory.CreateDirectory(Dir);
+                    var fi = new FileInfo(Current);
+                    if (fi.Exists && fi.Length > Max) { File.Delete(Old); File.Move(Current, Old); }
+                    File.AppendAllText(Current, line);
+                    return;
+                } catch { Thread.Sleep(25); }
+            }
+        }
+    }
+    // `TvShell.exe trace <dir> <max bytes> <kind> <message>...`: writes one line there, exits 0,
+    // 254 on bad arguments.
+    public static int Cli(string[] args) {
+        long max;
+        if (args.Length < 5 || !long.TryParse(args[2], out max) || max < 0) return 254;
+        Dir = args[1]; Max = max;
+        Write(args[3], string.Join(" ", args.Skip(4)));
+        return 0;
+    }
+}
+
+// Everything held on a Switch Pro controller, as the trace writes it: Nintendo's labels (A is the
+// right face button), Home and Capture included, which Pad.Buttons masks off, and a stick pushed
+// past the press threshold as a direction ("LS-left").
+static class PadNames {
+    static readonly string[] FullRight = { "Y", "X", "B", "A", null, null, "R", "ZR" };
+    static readonly string[] Shared = { "Minus", "Plus", "RS", "LS", "Home", "Capture", null, null };
+    static readonly string[] FullLeft = { "Down", "Up", "Right", "Left", null, null, "L", "ZL" };
+    static readonly string[] SimpleFace = { "B", "A", "Y", "X", "L", "R", "ZL", "ZR" };
+    static readonly string[] SimpleShared = { "Minus", "Plus", "LS", "RS", "Home", "Capture", null, null };
+    static readonly string[] Hat = { "Up", "Up+Right", "Right", "Down+Right", "Down", "Down+Left", "Left", "Up+Left" };
+
+    // "A+Home", "" with nothing held, null for a report this does not know.
+    public static string Of(byte[] rep) {
+        var held = new List<string>();
+        if (rep.Length >= 12 && rep[0] == 0x30) {
+            Bits(rep[3], FullRight, held); Bits(rep[4], Shared, held); Bits(rep[5], FullLeft, held);
+            Stick("LS", rep[6] | ((rep[7] & 0xF) << 8), (rep[7] >> 4) | (rep[8] << 4), held);
+            Stick("RS", rep[9] | ((rep[10] & 0xF) << 8), (rep[10] >> 4) | (rep[11] << 4), held);
+        } else if (rep.Length >= 4 && rep[0] == 0x3F) {
+            Bits(rep[1], SimpleFace, held); Bits(rep[2], SimpleShared, held);
+            if (rep[3] < 8) held.Add(Hat[rep[3]]);
+        } else return null;
+        return string.Join("+", held);
+    }
+    static void Bits(int b, string[] names, List<string> held) {
+        for (int i = 0; i < 8; i++) if ((b & (1 << i)) != 0 && names[i] != null) held.Add(names[i]);
+    }
+    // 12-bit axes centred near 2048; the same 900 as Pad.Pressed.
+    static void Stick(string name, int x, int y, List<string> held) {
+        if (x < 2048 - 900) held.Add(name + "-left");
+        if (x > 2048 + 900) held.Add(name + "-right");
+        if (y > 2048 + 900) held.Add(name + "-up");
+        if (y < 2048 - 900) held.Add(name + "-down");
+    }
+    // The couch's "something is wrong now" (Mark): Minus and Plus held together.
+    public static bool IsMark(string names) {
+        var held = (names ?? "").Split('+');
+        return held.Contains("Minus") && held.Contains("Plus");
+    }
+    // `TvShell.exe pad-names <hex report>`: prints the names ("-" for none), exits 1 when they are
+    // the mark chord, 0 otherwise, 2 for a report it does not know, 254 on bad arguments.
+    public static int Cli(string[] args) {
+        if (args.Length != 2) return 254;
+        var rep = Pad.Hex(args[1]);
+        if (rep == null || rep.Length == 0) return 254;
+        var names = Of(rep);
+        if (names == null) { Console.WriteLine("unknown"); return 2; }
+        Console.WriteLine(names == "" ? "-" : names);
+        return IsMark(names) ? 1 : 0;
+    }
+}
+
+// What the TV is showing, as Windows has it: what has focus, what is on top at the TV's centre,
+// whether the picture is black, whether Steam's overlay process runs, and every visible top-level
+// window over the TV, front first. Steam's in-game menu is drawn inside the game's own window, so
+// only a screenshot (Shots) shows it.
+static class TvView {
+    public static string Snapshot(Rectangle tv) {
+        var fg = N.GetForegroundWindow();
+        var top = N.GetAncestor(N.WindowFromPoint(new N.POINT { X = tv.X + tv.Width / 2, Y = tv.Y + tv.Height / 2 }), 2);
+        bool overlay = new[] { "gameoverlayui", "gameoverlayui64" }.Any(n => Process.GetProcessesByName(n).Length > 0);
+        var windows = Windows(tv, fg);
+        return "focus " + Who(fg, tv) + "; on top " + Who(top, tv) + "; picture " + Picture(tv)
+            + "; overlay process " + (overlay ? "running" : "not running")
+            + " || " + (windows.Count == 0 ? "no windows" : string.Join(" || ", windows));
+    }
+    // A window in a few words: process, pid, handle, and the display its centre is on.
+    public static string Who(IntPtr h, Rectangle tv) {
+        if (h == IntPtr.Zero) return "no window";
+        uint pid; N.GetWindowThreadProcessId(h, out pid);
+        string name = "?";
+        try { using (var p = Process.GetProcessById((int)pid)) name = p.ProcessName; } catch { }
+        var r = N.Rect(h);
+        bool onTv = tv.Contains(new Point(r.X + r.Width / 2, r.Y + r.Height / 2));
+        return name + "[" + pid + "] 0x" + h.ToInt64().ToString("X") + " on " + (onTv ? "tv" : "desk");
+    }
+    public static string Picture(Rectangle tv) {
+        var px = BlankSteam.Sample(tv);
+        return px.Length == 0 ? "unreadable" : BlankSteam.Dark(px) ? "black" : "not black";
+    }
+    // Front first, as EnumWindows lists them. A window counts once it covers a sixteenth of the
+    // TV, so a maximised desk window's 8-pixel edge past the desk does not.
+    public static List<string> Windows(Rectangle tv, IntPtr fg) {
+        var lines = new List<string>();
+        var names = new Dictionary<uint, string>();
+        N.EnumWindows((h, l) => {
+            if (!N.IsWindowVisible(h)) return true;
+            var r = N.Rect(h);
+            var over = Rectangle.Intersect(r, tv);
+            if ((long)over.Width * over.Height * 16 < (long)tv.Width * tv.Height || tv.Width <= 0) return true;
+            uint pid; N.GetWindowThreadProcessId(h, out pid);
+            string name;
+            if (!names.TryGetValue(pid, out name)) {
+                name = "?";
+                try { using (var p = Process.GetProcessById((int)pid)) name = p.ProcessName; } catch { }
+                names[pid] = name;
+            }
+            var sb = new StringBuilder(256); N.GetWindowText(h, sb, 256);
+            int ex = N.GetWindowLong(h, -20);
+            var flags = new List<string>();
+            if (h == fg) flags.Add("FOCUSED");
+            if ((ex & 0x8) != 0) flags.Add("topmost");
+            if (N.IsCloaked(h)) flags.Add("cloaked");
+            if (N.IsIconic(h)) flags.Add("minimised");
+            lines.Add(name + "[" + pid + "] 0x" + h.ToInt64().ToString("X") + " " + N.ClassOf(h) + " \"" + sb + "\" "
+                + r.X + "," + r.Y + " " + r.Width + "x" + r.Height + (flags.Count > 0 ? " " + string.Join(",", flags) : ""));
+            return true;
+        }, IntPtr.Zero);
+        return lines;
+    }
+    // `TvShell.exe tv-view <x> <y> <w> <h>`: prints the snapshot of that screen area, exits 0,
+    // 254 on bad arguments.
+    public static int Cli(string[] args) {
+        int[] r;
+        try { r = args.Skip(1).Select(int.Parse).ToArray(); } catch (Exception) { return 254; }
+        if (r.Length != 4) return 254;
+        Console.WriteLine(Snapshot(new Rectangle(r[0], r[1], r[2], r[3])));
+        return 0;
+    }
+}
+
+// Screenshots of the TV, half size, in tv-shots/: at a controller press (one per two seconds at
+// most), when what the TV shows changes, and at a mark. The newest Keep are kept. The trace line
+// of the moment names the file.
+static class Shots {
+    public static readonly string Dir = Path.Combine(Cfg.Dir, "tv-shots");
+    public const int Keep = 1500;
+    // Named by time, so the names sort oldest first: `20261126-203057-507-press.jpg`.
+    public static string Name(string dir, string why, DateTime at) {
+        var safe = new string((why ?? "").Where(c => char.IsLetterOrDigit(c) || c == '-').ToArray());
+        return Path.Combine(dir, at.ToString("yyyyMMdd-HHmmss-fff") + "-" + (safe == "" ? "shot" : safe) + ".jpg");
+    }
+    // False when the screen cannot be read (a locked or secure desktop) or the area is empty.
+    public static bool Save(string path, Rectangle area, int keep) {
+        try {
+            var dir = Path.GetDirectoryName(path);
+            Directory.CreateDirectory(dir);
+            using (var full = new Bitmap(area.Width, area.Height)) {
+                using (var g = Graphics.FromImage(full)) g.CopyFromScreen(area.X, area.Y, 0, 0, full.Size);
+                using (var half = new Bitmap(full, Math.Max(1, area.Width / 2), Math.Max(1, area.Height / 2))) {
+                    var jpeg = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
+                    var ps = new System.Drawing.Imaging.EncoderParameters(1);
+                    ps.Param[0] = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 70L);
+                    half.Save(path, jpeg, ps);
+                }
+            }
+            Prune(dir, keep);
+            return true;
+        } catch (Exception) { return false; }
+    }
+    public static void Prune(string dir, int keep) {
+        foreach (var old in new DirectoryInfo(dir).GetFiles("*.jpg").OrderByDescending(f => f.Name).Skip(keep))
+            try { old.Delete(); } catch { }
+    }
+    // `TvShell.exe tv-shot <dir> <keep> <x> <y> <w> <h> <why>`: saves one, prints its path, exits
+    // 0, 4 when the screen could not be read, 254 on bad arguments.
+    public static int Cli(string[] args) {
+        if (args.Length != 8) return 254;
+        int[] n;
+        try { n = args.Skip(2).Take(5).Select(int.Parse).ToArray(); } catch (Exception) { return 254; }
+        var path = Name(args[1], args[7], DateTime.Now);
+        if (!Save(path, new Rectangle(n[1], n[2], n[3], n[4]), n[0])) return 4;
+        Console.WriteLine(path);
+        return 0;
+    }
+}
+
+// "Something is wrong now", from the couch (Minus and Plus held together for two seconds) or from
+// the tray menu. The person cannot say from the couch when it went wrong, and the evidence is
+// pruned within hours, so a mark keeps it: one screenshot now, the last ones before it, and the
+// last stretch of the trace, the helper's log and Kodi's log, in marks/<time>/, which nothing
+// prunes. The helper then logs an ERROR naming that folder: what the person saw is a defect, and
+// the health check carries it to the fix pass.
+static class Mark {
+    public static readonly string Dir = Path.Combine(Cfg.Dir, "marks");
+    public const long Tail = 3L * 1024 * 1024;
+    public const int ShotsKept = 30;
+    public static string Now(string marksDir, string shotsDir, int shots, long tail, string why, string[] files, Rectangle tv) {
+        var at = DateTime.Now;
+        if (tv.Width > 0 && tv.Height > 0) Shots.Save(Shots.Name(shotsDir, "mark", at), tv, Shots.Keep);
+        var dest = Path.Combine(marksDir, at.ToString("yyyyMMdd-HHmmss"));
+        Directory.CreateDirectory(dest);
+        File.WriteAllText(Path.Combine(dest, "why.txt"), at.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + why + Environment.NewLine);
+        foreach (var f in files) CopyTail(f, Path.Combine(dest, Path.GetFileName(f)), tail);
+        if (Directory.Exists(shotsDir))
+            foreach (var s in new DirectoryInfo(shotsDir).GetFiles("*.jpg").OrderByDescending(x => x.Name).Take(shots))
+                s.CopyTo(Path.Combine(dest, s.Name), true);
+        return dest;
+    }
+    // The last `tail` bytes of a file another process may be writing; nothing for a missing one.
+    static void CopyTail(string src, string dest, long tail) {
+        if (!File.Exists(src)) return;
+        using (var s = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var d = new FileStream(dest, FileMode.Create)) {
+            s.Seek(Math.Max(0, s.Length - tail), SeekOrigin.Begin);
+            s.CopyTo(d);
+        }
+    }
+    // `TvShell.exe mark <marks dir> <shots dir> <shots> <tail bytes> <x> <y> <w> <h> <why> <file>...`:
+    // prints the mark's folder, exits 0, 254 on bad arguments. Logs nothing: the ERROR is the helper's.
+    public static int Cli(string[] args) {
+        if (args.Length < 10) return 254;
+        int shots; long tail; int[] r;
+        if (!int.TryParse(args[3], out shots) || !long.TryParse(args[4], out tail)) return 254;
+        try { r = args.Skip(5).Take(4).Select(int.Parse).ToArray(); } catch (Exception) { return 254; }
+        Console.WriteLine(Now(args[1], args[2], shots, tail, args[9], args.Skip(10).ToArray(), new Rectangle(r[0], r[1], r[2], r[3])));
+        return 0;
+    }
+}
+
+// Who holds UDP ports. Windows' System log has recorded "all ephemeral UDP ports in use" (Tcpip
+// 4266) once or twice a day for weeks, and an online game drops its connection when that
+// happens; between spikes there are a few dozen endpoints, so a look afterwards names nobody.
+// The helper counts them every few seconds and names the owners while the count is high.
+static class Ports {
+    [DllImport("iphlpapi.dll")] static extern uint GetExtendedUdpTable(IntPtr table, ref int size, bool sort, int af, int cls, uint reserved);
+    // Endpoints per owning pid, IPv4 and IPv6; empty when Windows will not say.
+    public static Dictionary<uint, int> UdpOwners() {
+        var owners = new Dictionary<uint, int>();
+        // MIB_UDPTABLE_OWNER_PID rows: address, port, pid (12 bytes); the IPv6 rows: address (16),
+        // scope id, port, pid (28 bytes). The pid is each row's last field.
+        foreach (var af in new[] { 2, 23 }) {
+            int rowSize = af == 2 ? 12 : 28, size = 0;
+            GetExtendedUdpTable(IntPtr.Zero, ref size, false, af, 1 /*UDP_TABLE_OWNER_PID*/, 0);
+            if (size <= 0) continue;
+            var buf = Marshal.AllocHGlobal(size);
+            try {
+                if (GetExtendedUdpTable(buf, ref size, false, af, 1, 0) != 0) continue;
+                int n = Marshal.ReadInt32(buf);
+                for (int i = 0; i < n; i++) {
+                    uint pid = (uint)Marshal.ReadInt32(buf, 4 + i * rowSize + rowSize - 4);
+                    int c; owners.TryGetValue(pid, out c); owners[pid] = c + 1;
+                }
+            } finally { Marshal.FreeHGlobal(buf); }
+        }
+        return owners;
+    }
+    // "1234 UDP endpoints: chrome[7324] 900, svchost[19024] 16, ..." - the `top` largest owners.
+    public static string Describe(Dictionary<uint, int> owners, int top) {
+        var parts = owners.OrderByDescending(kv => kv.Value).Take(top).Select(kv => {
+            string name = "?";
+            try { using (var p = Process.GetProcessById((int)kv.Key)) name = p.ProcessName; } catch { }
+            return name + "[" + kv.Key + "] " + kv.Value;
+        });
+        return owners.Values.Sum() + " UDP endpoints: " + string.Join(", ", parts);
+    }
+    // `TvShell.exe udp-owners`: prints Describe for the five largest owners, exits 0.
+    public static int Cli(string[] args) { Console.WriteLine(Describe(UdpOwners(), 5)); return 0; }
 }
 
 // Which windows may sit on the TV. Windows moves open windows around when the displays come back
@@ -1102,6 +1391,12 @@ static class Program {
         if (mode == "pad-used-last") return PadFocus.UsedLastCli(args);
         if (mode == "tv-seat") return TvSeat.Cli(args);
         if (mode == "desk-blank") return DeskBlank.Cli(args);
+        if (mode == "trace") return Trace.Cli(args);
+        if (mode == "pad-names") return PadNames.Cli(args);
+        if (mode == "tv-view") return TvView.Cli(args);
+        if (mode == "tv-shot") return Shots.Cli(args);
+        if (mode == "mark") return Mark.Cli(args);
+        if (mode == "udp-owners") return Ports.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "desk-primary") return DeskPrimary.Cli(args);
         if (mode == "launch") return Launcher.Run();
@@ -1570,6 +1865,8 @@ class Helper : Form {
         if (Game.Configured) menu.Items.AddRange(new ToolStripItem[] { miTv, miDesk, new ToolStripSeparator() });
         menu.Items.AddRange(new ToolStripItem[] { miBp, miMouse, miDeskWin, miDeskOff,
             new ToolStripMenuItem("Open log", null, (s, e) => { try { Process.Start("notepad.exe", Cfg.LogFile); } catch { } }),
+            // The same as Minus and Plus held on the controller (Mark); the next tick takes it.
+            new ToolStripMenuItem("Mark a problem on the TV now", null, (s, e) => { markWanted = "the tray menu"; }),
             new ToolStripSeparator(), new ToolStripMenuItem("Exit", null, (s, e) => Close()) });
         Icon ico = SystemIcons.Application;
         try { ico = DrawTrayIcon(); } catch { }
@@ -1624,6 +1921,12 @@ class Helper : Form {
     void OnForeground(IntPtr hook, uint ev, IntPtr h, int obj, int child, uint thread, uint time) {
         hookFg = h; hookFgAt = DateTime.Now;
         try { Cfg.Log("focus -> " + Describe(h)); } catch { }
+        // The trace adds the window's class and place, and how late the event came: the hook's
+        // events queue behind the controller's, which is how a press can read a switch half done.
+        try {
+            Trace.Write("focus", Describe(h) + " 0x" + h.ToInt64().ToString("X") + " " + N.ClassOf(h) + " " + N.Rect(h)
+                + ", event " + unchecked((uint)Environment.TickCount - time) + " ms old");
+        } catch { }
         try {
             uint pid; N.GetWindowThreadProcessId(h, out pid);
             bool isApp = h != IntPtr.Zero && tvApps.Any(a => a.Running && a.Proc != null && a.Proc.Id == (int)pid);
@@ -1636,6 +1939,11 @@ class Helper : Form {
     // foreground the hook has not reported yet is a switch still in flight (Uncovered).
     IntPtr hookFg = IntPtr.Zero; DateTime hookFgAt = DateTime.MinValue;
     static readonly TimeSpan FreshFocus = TimeSpan.FromSeconds(2);
+    // The trace's state: what was last written, so each line is a change (Trace).
+    string padTraced = null, tvTraced = null;
+    DateTime lastPressShot = DateTime.MinValue, lastTvShot = DateTime.MinValue;
+    DateTime markHeldSince = DateTime.MinValue; bool markTaken = false; string markWanted = null;
+    DateTime lastUdpCount = DateTime.MinValue; int udpTraced = 0; bool udpWarned = false;
 
     // A window as the log names it: process, pid, screen. The title only for windows on the TV;
     // desk titles (documents, browser tabs) are the person's business, not the log's.
@@ -1769,28 +2077,64 @@ class Helper : Form {
     bool padSeen = false;
     void OnPadReport(byte[] rep) {
         if (!padSeen) { padSeen = true; Cfg.Log("first controller report: id 0x" + rep[0].ToString("X2") + ", " + rep.Length + " bytes"); }
+        // The trace: every change in what is held, Home included. Holding Minus and Plus starts
+        // the mark's two seconds (Mark); Tick takes it, since a simple report is sent only on a change.
+        var held = PadNames.Of(rep);
+        if (held != null) {
+            var line = (rep[0] == 0x30 ? "full " : "simple ") + (held == "" ? "-" : held);
+            if (line != padTraced) {
+                padTraced = line;
+                Trace.Write("pad", line);
+                if (!PadNames.IsMark(held)) { markHeldSince = DateTime.MinValue; markTaken = false; }
+                else if (markHeldSince == DateTime.MinValue) markHeldSince = DateTime.Now;
+            }
+        }
         bool asKeys = PadToKeys(rep);
         if (Pad.Buttons(rep) == null) return;
         bool pressed = Pad.Pressed(padReport, rep);
         padReport = rep;   // kept current while the presses are keys, so no stale report reads as a press later
         if (pressed) DeskBlank.LastPad = DateTime.Now;   // Windows' idle clock does not see a controller
-        if (asKeys) return;
-        if (!pressed || (DateTime.Now - lastPadFocus).TotalSeconds < 1.5) return;
+        if (!pressed) return;
+        // Every press, and what it made the helper do: "nothing works" is either no press arriving
+        // or a decision here that sent it somewhere unseen, and the trace tells which.
+        var fgAtPress = N.GetForegroundWindow();
+        bool freshAtPress = fgAtPress != hookFg || DateTime.Now - hookFgAt < FreshFocus;
+        string at = " | focus " + Describe(fgAtPress) + " 0x" + fgAtPress.ToInt64().ToString("X")
+            + (freshAtPress ? " (just moved)" : "") + ", Steam in front " + SteamInFront();
+        if (!tvBounds.IsEmpty && (DateTime.Now - lastPressShot).TotalSeconds >= 2) {
+            lastPressShot = DateTime.Now;
+            var area = tvBounds; var shot = Shots.Name(Shots.Dir, "press", DateTime.Now);
+            ThreadPool.QueueUserWorkItem(_ => Shots.Save(shot, area, Shots.Keep));
+            at += ", shot " + Path.GetFileName(shot);
+        }
+        if (asKeys) { Trace.Write("press", "made keys for the BackWhenTV app" + at); return; }
+        if ((DateTime.Now - lastPadFocus).TotalSeconds < 1.5) { Trace.Write("press", "left alone: within 1.5 s of a focus change this made" + at); return; }
         // Already using something on the TV - leave it alone. A Steam window counts as the TV
         // unless it sits on the desk (the ordinary Steam client there must not keep the controller).
         // A press while no window has focus is mid-switch (PadFocus): leave it to whoever switches.
-        var act = PadFocus.Plan(N.GetForegroundWindow() != IntPtr.Zero, SteamInFront(), FocusIsOnTv(), FocusIsOnDesk());
-        if (act == PadFocus.Act.Leave) return;
+        bool onTvAtPress = FocusIsOnTv(), onDeskAtPress = FocusIsOnDesk();
+        var act = PadFocus.Plan(fgAtPress != IntPtr.Zero, SteamInFront(), onTvAtPress, onDeskAtPress);
+        if (act == PadFocus.Act.Leave) {
+            Trace.Write("press", "left alone: " + (fgAtPress == IntPtr.Zero ? "no window has focus, a switch is under way"
+                : SteamInFront() ? "a Steam window off the desk has focus (its menu in use)"
+                : "the focused window is on neither display") + at);
+            return;
+        }
         if (act == PadFocus.Act.Uncover) {
             // ... except a window covered by another of ours: focus the one on top (Uncovered).
-            var tv = Tv(); if (tv == null) return;
+            var tv = Tv(); if (tv == null) { Trace.Write("press", "left alone: no TV" + at); return; }
             var centre = new N.POINT { X = tv.Bounds.X + tv.Bounds.Width / 2, Y = tv.Bounds.Y + tv.Bounds.Height / 2 };
             var top = N.GetAncestor(N.WindowFromPoint(centre), 2);
             var onGame = GameWindow();
             var fg = N.GetForegroundWindow();
             bool fresh = fg != hookFg || DateTime.Now - hookFgAt < FreshFocus;
-            var uncover = Uncovered.Plan(top, fg, onGame, TvAppWindow(), fresh);
-            if (uncover == Uncovered.Act.Leave) return;
+            var app = TvAppWindow();
+            var uncover = Uncovered.Plan(top, fg, onGame, app, fresh);
+            string seen = "; on top " + TvView.Who(top, tv.Bounds) + ", game 0x" + onGame.ToInt64().ToString("X") + ", TV app 0x" + app.ToInt64().ToString("X");
+            if (uncover == Uncovered.Act.Leave) {
+                Trace.Write("press", "left alone: focus is on the TV and " + (top == fg ? "it is the window showing" : "not one the game and TV app swap between") + seen + at);
+                return;
+            }
             lastPadFocus = DateTime.Now;
             if (uncover == Uncovered.Act.RaiseFocused) {
                 var chosen = fg == onGame ? "game" : "TV app";
@@ -1798,11 +2142,14 @@ class Helper : Form {
                 bool shown = N.GetAncestor(N.WindowFromPoint(centre), 2) == fg;
                 Cfg.Log("controller press -> focus just moved to the " + chosen + " behind the " + (top == onGame ? "game" : "TV app")
                     + " -> kept it, " + (shown ? "raised it" : "not raised yet"));
+                Trace.Write("press", "raised the " + chosen + ", which focus just moved to: " + (shown ? "now on top" : "still not on top") + seen + at);
                 return;
             }
             var covering = top == onGame ? "game" : "TV app";
-            if (N.Focus(top)) Cfg.Log("controller press -> focus was behind the " + covering + " -> focused it");
+            bool took = N.Focus(top);
+            if (took) Cfg.Log("controller press -> focus was behind the " + covering + " -> focused it");
             else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> focus is behind the " + covering + " and Windows refused to move it (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
+            Trace.Write("press", (took ? "focused the " : "Windows refused to focus the ") + covering + ", which covered the focused window" + seen + at);
             return;
         }
         lastPadFocus = DateTime.Now;
@@ -1817,13 +2164,16 @@ class Helper : Form {
         var pick = PadFocus.Pick(game != IntPtr.Zero, gameScreen == "tv", kodi != IntPtr.Zero, tvAppUsedLast);
         if (pick == PadFocus.Target.Game) target = game;
         else if (pick == PadFocus.Target.App) target = kodi;
-        else if (pick == PadFocus.Target.None) return;   // the game is on the desk display: leave focus alone
+        else if (pick == PadFocus.Target.None) { Trace.Write("press", "left alone: focus is on the desk and the game is on the desk too" + at); return; }
         else { var bp = BigPictureWindows(); if (bp.Count > 0) target = bp[0]; }
-        if (target != IntPtr.Zero && N.GetForegroundWindow() != target) {
-            var what = target == game ? "game" : target == kodi ? "TV app" : "Big Picture";
-            if (N.Focus(target)) Cfg.Log("controller press -> focused " + what + " (focus was with " + fromText + ")");
-            else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> Windows refused to focus " + what + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
-        }
+        var what = target == IntPtr.Zero ? "nothing" : target == game ? "game" : target == kodi ? "TV app" : "Big Picture";
+        if (target == IntPtr.Zero) { Trace.Write("press", "nothing to take focus to the TV for: " + pick + " has no window" + at); return; }
+        if (N.GetForegroundWindow() == target) { Trace.Write("press", "the " + what + " already has focus" + at); return; }
+        bool focused = N.Focus(target);
+        if (focused) Cfg.Log("controller press -> focused " + what + " (focus was with " + fromText + ")");
+        else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> Windows refused to focus " + what + " (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
+        Trace.Write("press", (focused ? "took focus from the desk to the " : "Windows refused focus from the desk to the ") + what
+            + " 0x" + target.ToInt64().ToString("X") + " (" + pick + ")" + at);
     }
 
     // While the keyboard-only BackWhenTV app has focus, newly pressed buttons become its keys.
@@ -2192,6 +2542,52 @@ class Helper : Form {
     }
 
     void Tick() {
+        // --- the trace (Trace) --- what the TV shows, each time it changes, with a screenshot
+        // (one per two seconds at most); a mark asked for; and UDP ports (Ports). On its own,
+        // like the desk below: recording must never stop the rest of the tick.
+        try {
+            var tvNow = Tv();
+            if (tvNow == null) {
+                if (tvTraced != "no TV") { tvTraced = "no TV"; Trace.Write("tv", "no TV display: " + DisplayList()); }
+            } else {
+                var view = TvView.Snapshot(tvNow.Bounds) + " | helper: game on " + gameScreen
+                    + (gameHwnd != IntPtr.Zero ? ", game window 0x" + gameHwnd.ToInt64().ToString("X") : ", no game window")
+                    + ", TV app used last " + tvAppUsedLast + ", desk keyboard back " + (lastKeyReturn == DateTime.MinValue ? "never" : lastKeyReturn.ToString("HH:mm:ss"));
+                // The last field changes only when its own event happens, so a repeat is no change.
+                if (view != tvTraced) {
+                    tvTraced = view;
+                    string shotNote = "";
+                    if ((DateTime.Now - lastTvShot).TotalSeconds >= 2) {
+                        lastTvShot = DateTime.Now;
+                        var area = tvNow.Bounds; var shot = Shots.Name(Shots.Dir, "tv", DateTime.Now);
+                        ThreadPool.QueueUserWorkItem(_ => Shots.Save(shot, area, Shots.Keep));
+                        shotNote = " | shot " + Path.GetFileName(shot);
+                    }
+                    Trace.Write("tv", view + shotNote);
+                }
+            }
+            if (markHeldSince != DateTime.MinValue && !markTaken && DateTime.Now - markHeldSince >= TimeSpan.FromSeconds(2)) {
+                markTaken = true; markWanted = "Minus and Plus held on the controller";
+            }
+            if (markWanted != null) {
+                var why = markWanted; markWanted = null;
+                Trace.Write("mark", why);
+                var dest = Mark.Now(Mark.Dir, Shots.Dir, Mark.ShotsKept, Mark.Tail, why,
+                    new[] { Trace.Old, Trace.Current, Cfg.LogFile, Cfg.KodiLog }, tvNow == null ? Rectangle.Empty : tvNow.Bounds);
+                Cfg.Error("problem marked on the TV (" + why + "): the screenshots and the last of the trace and logs are in " + dest);
+            }
+            if ((DateTime.Now - lastUdpCount).TotalSeconds >= 5) {
+                lastUdpCount = DateTime.Now;
+                var owners = Ports.UdpOwners();
+                int total = owners.Values.Sum();
+                // Traced on a change of 500 or more, and with the owners named while above 2000;
+                // near exhaustion (16384 ports) once in the log, the trace has the rest.
+                if (Math.Abs(total - udpTraced) >= 500 || (total >= 2000 && total != udpTraced)) { udpTraced = total; Trace.Write("udp", Ports.Describe(owners, 5)); }
+                if (total >= 12000 && !udpWarned) { udpWarned = true; Cfg.Warn("UDP ports nearly exhausted, online games disconnect: " + Ports.Describe(owners, 5)); }
+                else if (total < 8000) udpWarned = false;
+            }
+        } catch (Exception ex) { Fault("trace", ex); }
+
         // --- the desk monitor while the TV plays (DeskBlank) --- first, and on its own: a fault
         // here must not stop the rest of the tick, nor the rest of the tick stop a wake.
         try {
