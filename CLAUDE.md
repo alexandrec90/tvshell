@@ -79,6 +79,11 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
 - **Steam counts a tile as running while anything it started is alive**, and then its
   "Resume" does nothing useful. So the game launcher closes the store launcher when the
   game exits, and Big Picture is not restarted over a TV app still open on the TV.
+- **Home opens Steam's menu in the most recently started tile still running, not the focused
+  one.** With the game's tile started after Kodi's, every menu opened in the game, even behind
+  Kodi in front of it, unseen, taking every press. So Home with the tile-started game behind
+  something on the TV raises the game (`SteamMenu`). Read `gamepadoverlay_uid<overlay pid>` in
+  Steam's `logs/webhelper.txt` to see which app's menu opened.
 - **Steam hides Big Picture while a game runs**; that is not "closed". Reopening it then
   covers the game with a black screen.
 - **Steam's window can end up focused and black over the game or TV app**: after its menu
@@ -142,6 +147,23 @@ knowing, INFO is the story. Every focus change is logged with the process that t
 so a "lost focus" has a culprit; every TV app's exit is logged with its exit code; a
 crash is an ERROR, and Kodi's own log is copied to `crashes/` before its next start
 overwrites it.
+
+**The trace is the evidence behind the story** (`trace.log` beside it, 32 MB, rotated to
+`trace.old.log`). Each line is written when something changes: what the controller holds
+(`pad`, Home included), every press with what the helper decided and why (`press`, never
+silent), every focus change with how late its event came (`focus`), what the TV shows
+(`tv`: focus, the window on top, whether the picture is black, every window over the TV
+front first), and UDP endpoint owners (`udp`). Presses and TV changes save a half-size
+screenshot to `tv-shots/` (the newest 1500), and the trace line names the file. Look at
+the screenshots: Steam's menu is drawn inside the window under it, so window data says
+Kodi is on top while the TV shows Steam's menu. **Diagnose from the trace and the
+screenshots before changing the helper**; a fix from tvshell.log alone is a guess.
+
+**Marks.** Minus and Plus held together for two seconds on the controller, or "Mark a
+problem on the TV now" in the tray, copies a screenshot, the last screenshots and the tails
+of the trace, this log and Kodi's to `marks/<time>/`, which nothing prunes, and logs an
+ERROR naming that folder. A taken mark plays Windows' `tada.wav` and shows a green banner
+for four seconds (`Cue`): on the TV, or on the desk for the tray. Start a fix there.
 
 `tvshell/health.py` reads all of that, plus the Windows Application log's crash events,
 and the `local` tier runs it nightly (`tests/test_health.py`), one test per kind of

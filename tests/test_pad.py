@@ -20,7 +20,7 @@ CENTRED = "000880" * 2  # both 12-bit sticks at 2048
 pytestmark = pytest.mark.ci_e2e
 
 # What this module exercises in the helper (tests/test_helper_coverage.py holds it to that).
-COVERS = ("Pad.Buttons", "Pad.Pressed", "Pad.Hex", "Pad.Cli", "mode:pad-press")
+COVERS = ("Pad.Buttons", "Pad.Pressed", "Pad.Pushed", "Pad.Hex", "Pad.Cli", "mode:pad-press")
 
 
 def full(right: int = 0, shared: int = 0, left: int = 0, sticks: str = CENTRED) -> str:
@@ -64,6 +64,14 @@ def pressed(exe: Path, *args: str) -> int:
         (full(), full(sticks="FF0F80" + "000880"), PRESS),  # left stick hard right
         ("-", full(sticks="FF0F80" + "000880"), PRESS),  # a push needs no earlier report
         (full(), full(sticks="400880" + "000880"), NONE),  # 0x840: drift
+        # regression: a held stick is one press, not one per report. Thirty a second, each a
+        # focus decision, froze the helper's thread for 40 s and the desk keyboard with it.
+        (full(sticks="FF0F80" + "000880"), full(sticks="FF0F80" + "000880"), NONE),
+        (full(sticks="000880" + "FF0F80"), full(sticks="000880" + "FF0F80"), NONE),  # right stick
+        (full(sticks="FF0F80" + "000880"), full(), NONE),  # let go
+        (full(sticks="FF0F80" + "000880"), full(sticks="FF0FF0" + "000880"), PRESS),  # and up too
+        (full(sticks="FF0F80" + "000880"), full(sticks="FF0F80" + "FF0F80"), PRESS),  # the other stick
+        (simple(), full(sticks="FF0F80" + "000880"), PRESS),  # pushed as the format switches
         # nothing to compare with yet, and reports without buttons
         ("-", full(right=0x08), NONE),
         (full(), "21" + "00" * 11, NONE),
