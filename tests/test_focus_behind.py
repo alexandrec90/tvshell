@@ -72,11 +72,39 @@ def test_focus_landed_usage(exe, args):
         (OTHER, APP, NO, "not one of ours on top"),
     ],
 )
-def test_a_press_moves_focus_to_the_window_on_top(exe, top, focused, expected, why):
+def test_a_press_moves_a_settled_focus_to_the_window_on_top(exe, top, focused, expected, why):
     assert run(exe, "uncovered", top, focused, GAME, APP) == expected, why
 
 
-@pytest.mark.parametrize("args", [(), ("1", "2", "3"), ("1", "2", "3", "x")])
+RAISE_FOCUSED = 2  # Uncovered.Act
+
+
+@pytest.mark.parametrize(
+    ("top", "focused", "expected", "why"),
+    [
+        # Regression: Steam's overlay switching from the game to Kodi focused Kodi a moment
+        # before Kodi rose over the game, and the press that picked it handed focus back to the
+        # game. The overlay froze over the game and no input reached anything.
+        (GAME, APP, RAISE_FOCUSED, "Steam's switch to the app is still in flight"),
+        (APP, GAME, RAISE_FOCUSED, "the game was just chosen over the app"),
+        (GAME, GAME, NO, "the focused window is the one showing"),
+        (STEAM, APP, NO, "Steam's menu over the app"),
+        (GAME, STEAM, NO, "never away from Steam's window"),
+        ("0", APP, NO, "nothing is showing"),
+    ],
+)
+def test_a_press_keeps_a_focus_that_just_moved(exe, top, focused, expected, why):
+    assert run(exe, "uncovered", top, focused, GAME, APP, "1") == expected, why
+
+
+def test_a_focus_that_has_settled_behind_moves_to_the_window_on_top(exe):
+    assert run(exe, "uncovered", GAME, APP, GAME, APP, "0") == YES
+
+
+@pytest.mark.parametrize(
+    "args",
+    [(), ("1", "2", "3"), ("1", "2", "3", "x"), ("1", "2", "3", "4", "2"), ("1", "2", "3", "4", "0", "0")],
+)
 def test_uncovered_usage(exe, args):
     assert run(exe, "uncovered", *args) == USAGE
 

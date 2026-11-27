@@ -564,19 +564,33 @@ static class BlankSteam {
 // Focus on the TV but on a window another of ours covers (Kodi behind the game): every press
 // goes to a window nobody can see. Hand focus to the one on top. Only between the game and the
 // TV apps: never away from or onto Steam's windows, whose menu the Home button opens over them.
+// A focus that has only just moved is a choice in progress, not a stuck one: Steam's overlay
+// switching from the game to Kodi focuses Kodi a moment before Kodi rises over the game, and the
+// A press that picked it, read in that moment, handed focus back to the game. The game then sat
+// on top with the overlay frozen while the controller went nowhere. So a fresh focus is kept and
+// its window raised; only a focus that has sat behind the other window is moved to it.
 static class Uncovered {
-    // Pure: should a press move focus from `fg` to `top`, the window showing on the TV?
-    public static bool Plan(IntPtr top, IntPtr fg, IntPtr game, IntPtr app) {
-        if (top == IntPtr.Zero || top == fg) return false;
-        return (top == game || top == app) && (fg == game || fg == app);
+    public enum Act { Leave = 0, FocusTop = 1, RaiseFocused = 2 }
+    // Pure. `top`: the window showing at the TV's centre. `fresh`: focus moved in the last
+    // moments, or the move has not been reported yet.
+    public static Act Plan(IntPtr top, IntPtr fg, IntPtr game, IntPtr app, bool fresh) {
+        if (top == IntPtr.Zero || top == fg) return Act.Leave;
+        if (!((top == game || top == app) && (fg == game || fg == app))) return Act.Leave;
+        return fresh ? Act.RaiseFocused : Act.FocusTop;
     }
-    // `TvShell.exe uncovered <top> <focused> <game> <app>`: exits 1 to focus the top window, 0 to
-    // leave focus alone, 254 on bad arguments (0 is no window).
+    // `TvShell.exe uncovered <top> <focused> <game> <app> [<fresh 0|1>]`: exits with the Act
+    // (0 leave, 1 focus the top window, 2 raise the focused one), 254 on bad arguments. 0 is no
+    // window; `fresh` defaults to 0.
     public static int Cli(string[] args) {
+        if (args.Length != 5 && args.Length != 6) return 254;
+        bool fresh = false;
+        if (args.Length == 6) {
+            if (args[5] == "1") fresh = true;
+            else if (args[5] != "0") return 254;
+        }
         long[] w;
-        try { w = args.Skip(1).Select(long.Parse).ToArray(); } catch (Exception) { return 254; }
-        if (w.Length != 4) return 254;
-        return Plan(new IntPtr(w[0]), new IntPtr(w[1]), new IntPtr(w[2]), new IntPtr(w[3])) ? 1 : 0;
+        try { w = args.Skip(1).Take(4).Select(long.Parse).ToArray(); } catch (Exception) { return 254; }
+        return (int)Plan(new IntPtr(w[0]), new IntPtr(w[1]), new IntPtr(w[2]), new IntPtr(w[3]), fresh);
     }
 }
 
@@ -1608,6 +1622,7 @@ class Helper : Form {
 
     IntPtr fgHook = IntPtr.Zero; N.WinEventProc fgHookProc;   // held in a field, like keyHookProc
     void OnForeground(IntPtr hook, uint ev, IntPtr h, int obj, int child, uint thread, uint time) {
+        hookFg = h; hookFgAt = DateTime.Now;
         try { Cfg.Log("focus -> " + Describe(h)); } catch { }
         try {
             uint pid; N.GetWindowThreadProcessId(h, out pid);
@@ -1616,6 +1631,11 @@ class Helper : Form {
         } catch { }
     }
     bool tvAppUsedLast = false;   // a TV app, not the game, was the last of the two focused (PadFocus)
+    // The last focus change the hook delivered, and when. The hook's events queue behind raw
+    // input, so a press can be handled before the event of the switch it is part of: a
+    // foreground the hook has not reported yet is a switch still in flight (Uncovered).
+    IntPtr hookFg = IntPtr.Zero; DateTime hookFgAt = DateTime.MinValue;
+    static readonly TimeSpan FreshFocus = TimeSpan.FromSeconds(2);
 
     // A window as the log names it: process, pid, screen. The title only for windows on the TV;
     // desk titles (documents, browser tabs) are the person's business, not the log's.
@@ -1767,8 +1787,19 @@ class Helper : Form {
             var centre = new N.POINT { X = tv.Bounds.X + tv.Bounds.Width / 2, Y = tv.Bounds.Y + tv.Bounds.Height / 2 };
             var top = N.GetAncestor(N.WindowFromPoint(centre), 2);
             var onGame = GameWindow();
-            if (!Uncovered.Plan(top, N.GetForegroundWindow(), onGame, TvAppWindow())) return;
+            var fg = N.GetForegroundWindow();
+            bool fresh = fg != hookFg || DateTime.Now - hookFgAt < FreshFocus;
+            var uncover = Uncovered.Plan(top, fg, onGame, TvAppWindow(), fresh);
+            if (uncover == Uncovered.Act.Leave) return;
             lastPadFocus = DateTime.Now;
+            if (uncover == Uncovered.Act.RaiseFocused) {
+                var chosen = fg == onGame ? "game" : "TV app";
+                N.SetWindowPos(fg, IntPtr.Zero, 0, 0, 0, 0, 0x1 | 0x2 | 0x10 /*NOSIZE|NOMOVE|NOACTIVATE, HWND_TOP*/);
+                bool shown = N.GetAncestor(N.WindowFromPoint(centre), 2) == fg;
+                Cfg.Log("controller press -> focus just moved to the " + chosen + " behind the " + (top == onGame ? "game" : "TV app")
+                    + " -> kept it, " + (shown ? "raised it" : "not raised yet"));
+                return;
+            }
             var covering = top == onGame ? "game" : "TV app";
             if (N.Focus(top)) Cfg.Log("controller press -> focus was behind the " + covering + " -> focused it");
             else { lastPadFocus = DateTime.MinValue; Cfg.Warn("controller press -> focus is behind the " + covering + " and Windows refused to move it (focus stays with " + Describe(N.GetForegroundWindow()) + ")"); }
