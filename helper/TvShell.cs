@@ -594,6 +594,29 @@ static class Uncovered {
     }
 }
 
+// Home opens Steam's menu in the most recently started tile that still runs, not in the focused
+// window: Steam's own log shows every menu going to the game's overlay from the moment its tile
+// started, even with Kodi focused in front of it (20:21-20:50 and 22:06-23:11 on 2026-11-26, and
+// to Kodi's again once the game had closed). With Kodi in front, the menu opened in the game behind
+// it: unseen, it took every press (only its sounds came through), and the couch was stuck.
+// So Home with the game's tile running and something else in front on the TV raises the game,
+// without activating it: Steam's menu then shows, and Steam takes focus for it itself.
+static class SteamMenu {
+    // Pure. `gameFromTile`: the game was started by its Steam tile, so Steam's menu opens in it.
+    public static bool RaiseGame(bool gameFromTile, bool gameOnTv, IntPtr top, IntPtr game) {
+        return gameFromTile && gameOnTv && game != IntPtr.Zero && top != game;
+    }
+    // `TvShell.exe steam-menu <from tile 0|1> <on tv 0|1> <top> <game>`: exits 1 to raise the game,
+    // 0 to leave it, 254 on bad arguments (0 is no window).
+    public static int Cli(string[] args) {
+        if (args.Length != 5) return 254;
+        foreach (var b in args.Skip(1).Take(2)) if (b != "0" && b != "1") return 254;
+        long top, game;
+        if (!long.TryParse(args[3], out top) || !long.TryParse(args[4], out game)) return 254;
+        return RaiseGame(args[1] == "1", args[2] == "1", new IntPtr(top), new IntPtr(game)) ? 1 : 0;
+    }
+}
+
 // What a controller press does to focus. The helper only ever takes focus from the desk display:
 // a press with focus on the TV is the TV's own (at most Uncovered), and a press while no window
 // has focus is one that lands mid-switch. Steam's overlay switching from the game to a TV app is
@@ -1499,6 +1522,7 @@ static class Program {
         if (mode == "mark") return Mark.Cli(args);
         if (mode == "udp-owners") return Ports.Cli(args);
         if (mode == "cue") return Cue.Cli(args);
+        if (mode == "steam-menu") return SteamMenu.Cli(args);
         TvDisplay.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tv.cfg"));
         if (mode == "desk-primary") return DeskPrimary.Cli(args);
         if (mode == "launch") return Launcher.Run();
@@ -1616,7 +1640,7 @@ static class Launcher {
     }
 
     // Another `TvShell.exe launch` still running: the one a tile started, waiting on the game.
-    static bool TileLauncherRunning() {
+    public static bool TileLauncherRunning() {
         int me = Process.GetCurrentProcess().Id;
         try {
             using (var q = new System.Management.ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='TvShell.exe'"))
@@ -2068,6 +2092,7 @@ class Helper : Form {
     DateTime markHeldSince = DateTime.MinValue; bool markTaken = false; string markWanted = null;
     DateTime lastUdpCount = DateTime.MinValue; int udpTraced = 0; bool udpWarned = false;
     DateTime lateLogged = DateTime.MinValue;
+    bool homeHeld = false;   // Home down in the last report: its press is the edge (SteamMenu)
 
     // A window as the log names it: process, pid, screen. The title only for windows on the TV;
     // desk titles (documents, browser tabs) are the person's business, not the log's.
@@ -2217,6 +2242,25 @@ class Helper : Form {
             if (markHeldSince != DateTime.MinValue && !markTaken && DateTime.Now - markHeldSince >= TimeSpan.FromSeconds(2)) {
                 markTaken = true; markWanted = "Minus and Plus held on the controller";
             }
+            // Home going down: Steam opens its menu in the most recently started tile (SteamMenu).
+            // Only with focus on the TV: with the desk focused Steam is not reading the controller.
+            bool home = held.Split('+').Contains("Home");
+            if (home && !homeHeld && !tvBounds.IsEmpty && FocusIsOnTv()) {
+                var homeGame = GameWindow();
+                var homeCentre = new N.POINT { X = tvBounds.X + tvBounds.Width / 2, Y = tvBounds.Y + tvBounds.Height / 2 };
+                var homeTop = N.GetAncestor(N.WindowFromPoint(homeCentre), 2);
+                bool fromTile = homeGame != IntPtr.Zero && homeTop != homeGame && Launcher.TileLauncherRunning();   // lists processes: only when it can matter
+                if (SteamMenu.RaiseGame(fromTile, gameScreen == "tv", homeTop, homeGame)) {
+                    N.SetWindowPos(homeGame, IntPtr.Zero, 0, 0, 0, 0, 0x1 | 0x2 | 0x10 /*NOSIZE|NOMOVE|NOACTIVATE, HWND_TOP*/);
+                    bool shown = N.GetAncestor(N.WindowFromPoint(homeCentre), 2) == homeGame;
+                    Cfg.Log("Home with the game's tile running behind " + Describe(homeTop) + " -> " + (shown ? "raised the game" : "could not raise the game") + ", where Steam opens its menu");
+                    Trace.Write("home", (shown ? "raised the game 0x" : "could not raise the game 0x") + homeGame.ToInt64().ToString("X") + " over " + TvView.Who(homeTop, tvBounds));
+                } else {
+                    Trace.Write("home", "left: " + (homeGame == IntPtr.Zero ? "no game window" : homeTop == homeGame ? "the game is in front already"
+                        : gameScreen != "tv" ? "the game is on the desk" : "the game was not started by its tile") + "; on top " + TvView.Who(homeTop, tvBounds));
+                }
+            }
+            homeHeld = home;
         }
         bool asKeys = PadToKeys(rep);
         if (Pad.Buttons(rep) == null) return;

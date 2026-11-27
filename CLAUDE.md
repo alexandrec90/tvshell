@@ -79,6 +79,11 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
 - **Steam counts a tile as running while anything it started is alive**, and then its
   "Resume" does nothing useful. So the game launcher closes the store launcher when the
   game exits, and Big Picture is not restarted over a TV app still open on the TV.
+- **Home opens Steam's menu in the most recently started tile still running, not the focused
+  one.** With the game's tile started after Kodi's, every menu opened in the game, even behind
+  Kodi in front of it, unseen, taking every press. So Home with the tile-started game behind
+  something on the TV raises the game (`SteamMenu`). Read `gamepadoverlay_uid<overlay pid>` in
+  Steam's `logs/webhelper.txt` to see which app's menu opened.
 - **Steam hides Big Picture while a game runs**; that is not "closed". Reopening it then
   covers the game with a black screen.
 - **Steam's window can end up focused and black over the game or TV app**: after its menu
