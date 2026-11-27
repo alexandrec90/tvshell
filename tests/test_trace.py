@@ -18,6 +18,8 @@ import pytest
 COVERS = (
     "Trace.Write",
     "Trace.Cli",
+    "Trace.Drain",
+    "Trace.Flush",
     "PadNames.Of",
     "PadNames.Bits",
     "PadNames.Stick",

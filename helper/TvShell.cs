@@ -834,12 +834,11 @@ static class Pad {
     public static bool Pressed(byte[] prev, byte[] rep) {
         var cur = Buttons(rep);
         if (cur == null) return false;
-        // A deliberate stick push counts (12-bit sticks, centre ~2048), far beyond drift.
-        if (cur[0] == 0x30) {
-            int lx = rep[6] | ((rep[7] & 0xF) << 8), ly = (rep[7] >> 4) | (rep[8] << 4);
-            int rx = rep[9] | ((rep[10] & 0xF) << 8), ry = (rep[10] >> 4) | (rep[11] << 4);
-            if (Math.Abs(lx - 2048) > 900 || Math.Abs(ly - 2048) > 900 || Math.Abs(rx - 2048) > 900 || Math.Abs(ry - 2048) > 900) return true;
-        }
+        // A deliberate stick push counts (12-bit sticks, centre ~2048), far beyond drift - once, when
+        // it is pushed. Counting every report while it was held made a held stick 30 presses a
+        // second, each one a full focus decision on the helper's thread, which fell half a minute
+        // behind and held up the desk keyboard with it.
+        if (cur[0] == 0x30 && (Pushed(rep) & ~(prev == null ? 0 : Pushed(prev))) != 0) return true;
         var old = prev == null ? null : Buttons(prev);
         if (old == null || old[0] != cur[0]) return false;
         if (cur[0] == 0x3F) {
@@ -849,6 +848,21 @@ static class Pad {
         }
         for (int i = 1; i < 4; i++) if ((cur[i] & ~old[i]) != 0) return true;
         return false;
+    }
+
+    // The stick directions pushed past 900 in a full report, one bit each (left stick left, right,
+    // down, up, then the right stick's); 0 for any other report.
+    public static int Pushed(byte[] rep) {
+        if (rep.Length < 12 || rep[0] != 0x30) return 0;
+        int lx = rep[6] | ((rep[7] & 0xF) << 8), ly = (rep[7] >> 4) | (rep[8] << 4);
+        int rx = rep[9] | ((rep[10] & 0xF) << 8), ry = (rep[10] >> 4) | (rep[11] << 4);
+        int[] axes = { lx, ly, rx, ry };
+        int bits = 0;
+        for (int i = 0; i < 4; i++) {
+            if (axes[i] < 2048 - 900) bits |= 1 << (2 * i);
+            if (axes[i] > 2048 + 900) bits |= 2 << (2 * i);
+        }
+        return bits;
     }
 
     // `TvShell.exe pad-press <prev hex|-> <report hex>`: exits 1 for a press, 0 for none, 254 on
@@ -882,21 +896,52 @@ static class Trace {
     public static string Current { get { return Path.Combine(Dir, "trace.log"); } }
     public static string Old { get { return Path.Combine(Dir, "trace.old.log"); } }
 
-    // `yyyy-MM-dd HH:mm:ss.fff kind message`, one line; rotated to trace.old.log past Max.
+    // `yyyy-MM-dd HH:mm:ss.fff kind message`, one line; rotated to trace.old.log past Max. Queued
+    // and written by a thread of its own: the helper's thread handles the controller and must
+    // never wait on a file (a retry sleeps, and a held stick once wrote 30 lines a second).
+    static readonly Queue<string> pending = new Queue<string>();
+    static Thread writer;
+    static int unwritten;
     public static void Write(string kind, string m) {
         var line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + kind.PadRight(5) + " "
             + (m ?? "").Replace("\r", "").Replace("\n", " | ") + Environment.NewLine;
         lock (gate) {
+            pending.Enqueue(line); unwritten++;
+            if (writer == null) { writer = new Thread(Drain) { IsBackground = true, Name = "trace" }; writer.Start(); }
+            Monitor.PulseAll(gate);   // all: a Flush waits on the same lock and must not take the writer's wake
+        }
+    }
+    static void Drain() {
+        while (true) {
+            var batch = new StringBuilder(); int n;
+            lock (gate) {
+                while (pending.Count == 0) Monitor.Wait(gate);
+                n = pending.Count;
+                while (pending.Count > 0) batch.Append(pending.Dequeue());
+            }
             for (int i = 0; i < 5; i++) {
                 try {
                     Directory.CreateDirectory(Dir);
                     var fi = new FileInfo(Current);
                     if (fi.Exists && fi.Length > Max) { File.Delete(Old); File.Move(Current, Old); }
-                    File.AppendAllText(Current, line);
-                    return;
+                    File.AppendAllText(Current, batch.ToString());
+                    break;
                 } catch { Thread.Sleep(25); }
             }
+            lock (gate) { unwritten -= n; Monitor.PulseAll(gate); }
         }
+    }
+    // Waits, at most `ms`, until every queued line is in the file. True when they all are.
+    public static bool Flush(int ms) {
+        var until = DateTime.Now.AddMilliseconds(ms);
+        lock (gate) {
+            while (unwritten > 0) {
+                var left = until - DateTime.Now;
+                if (left <= TimeSpan.Zero) return false;
+                Monitor.Wait(gate, left);
+            }
+        }
+        return true;
     }
     // `TvShell.exe trace <dir> <max bytes> <kind> <message>...`: writes one line there, exits 0,
     // 254 on bad arguments.
@@ -905,7 +950,7 @@ static class Trace {
         if (args.Length < 5 || !long.TryParse(args[2], out max) || max < 0) return 254;
         Dir = args[1]; Max = max;
         Write(args[3], string.Join(" ", args.Skip(4)));
-        return 0;
+        return Flush(5000) ? 0 : 3;
     }
 }
 
@@ -1937,8 +1982,22 @@ class Helper : Form {
         mouseTimer.Tick += (s, e) => { try { KeepMouseOnDesk(); RememberDeskWindow(); } catch (Exception ex) { Fault("mouse", ex); } };
         mouseTimer.Start();
         keyHookProc = OnKey;   // held in a field: a collected delegate would crash the hook
-        keyHook = N.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, keyHookProc, N.GetModuleHandle(null), 0);
-        if (keyHook == IntPtr.Zero) Cfg.Error("keyboard hook unavailable (error " + Marshal.GetLastWin32Error() + "): the keyboard will not return focus to the desk");
+        // On a thread of its own, with nothing else to do. Windows calls a low-level keyboard hook
+        // on the thread that set it and holds every key on the PC until it returns; on this form's
+        // thread, which also handles the controller and the tick, a backlog there (a held stick,
+        // 2026-11-26) froze desk typing for 40 s, and Windows drops a hook that keeps timing out.
+        int hookError = 0;
+        var hookReady = new ManualResetEvent(false);
+        var hookThread = new Thread(() => {
+            keyHook = N.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, keyHookProc, N.GetModuleHandle(null), 0);
+            if (keyHook == IntPtr.Zero) hookError = Marshal.GetLastWin32Error();
+            hookReady.Set();
+            if (keyHook != IntPtr.Zero) Application.Run();   // the message loop the hook is called from
+        }) { IsBackground = true, Name = "keyboard hook" };
+        hookThread.SetApartmentState(ApartmentState.STA);
+        hookThread.Start();
+        hookReady.WaitOne(5000);
+        if (keyHook == IntPtr.Zero) Cfg.Error("keyboard hook unavailable (error " + hookError + "): the keyboard will not return focus to the desk");
         // Every focus change, whoever caused it: without it, "the game lost focus" has no culprit.
         fgHookProc = OnForeground;
         fgHook = N.SetWinEventHook(3 /*EVENT_SYSTEM_FOREGROUND*/, 3, IntPtr.Zero, fgHookProc, 0, 0, 0x2 /*OUTOFCONTEXT|SKIPOWNPROCESS*/);
@@ -1981,8 +2040,15 @@ class Helper : Form {
         // The trace adds the window's class and place, and how late the event came: the hook's
         // events queue behind the controller's, which is how a press can read a switch half done.
         try {
+            uint late = unchecked((uint)Environment.TickCount - time);
             Trace.Write("focus", Describe(h) + " 0x" + h.ToInt64().ToString("X") + " " + N.ClassOf(h) + " " + N.Rect(h)
-                + ", event " + unchecked((uint)Environment.TickCount - time) + " ms old");
+                + ", event " + late + " ms old");
+            // An event this late means this thread was stuck, and the controller and the focus
+            // handling with it (40 s once, from a held stick). A defect: once per ten minutes.
+            if (late > 5000 && late < 600000 && DateTime.Now - lateLogged > TimeSpan.FromMinutes(10)) {
+                lateLogged = DateTime.Now;
+                Cfg.Error("the helper's thread was stuck: a focus change reached it " + late / 1000 + " s late; the trace has what it was doing");
+            }
         } catch { }
         try {
             uint pid; N.GetWindowThreadProcessId(h, out pid);
@@ -2001,6 +2067,7 @@ class Helper : Form {
     DateTime lastPressShot = DateTime.MinValue, lastTvShot = DateTime.MinValue;
     DateTime markHeldSince = DateTime.MinValue; bool markTaken = false; string markWanted = null;
     DateTime lastUdpCount = DateTime.MinValue; int udpTraced = 0; bool udpWarned = false;
+    DateTime lateLogged = DateTime.MinValue;
 
     // A window as the log names it: process, pid, screen. The title only for windows on the TV;
     // desk titles (documents, browser tabs) are the person's business, not the log's.
@@ -2325,6 +2392,7 @@ class Helper : Form {
         Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPower;
         Microsoft.Win32.SystemEvents.SessionSwitch -= OnSession;
         Cfg.Log("helper closing (Exit from the tray menu)");
+        Trace.Flush(2000);
         if (DeskBlank.Blanked) { DeskBlank.Power(DeskBlank.PowerOn); DeskBlank.Blanked = false; }   // never leave the desk dark behind us
         var all = new N.RECT { L = -32000, T = -32000, R = 32000, B = 32000 }; N.ClipCursor(ref all);
         tray.Visible = false; tray.Dispose(); base.OnFormClosed(e);
@@ -2634,6 +2702,7 @@ class Helper : Form {
             if (markWanted != null) {
                 var why = markWanted; markWanted = null;
                 Trace.Write("mark", why);
+                Trace.Flush(2000);   // the mark copies the trace's tail: the moment itself must be in it
                 var dest = Mark.Now(Mark.Dir, Shots.Dir, Mark.ShotsKept, Mark.Tail, why,
                     new[] { Trace.Old, Trace.Current, Cfg.LogFile, Cfg.KodiLog }, tvNow == null ? Rectangle.Empty : tvNow.Bounds);
                 Cfg.Error("problem marked on the TV (" + why + "): the screenshots and the last of the trace and logs are in " + dest);
