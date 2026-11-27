@@ -194,7 +194,10 @@ def test_a_screenshot_is_a_half_size_jpeg_named_by_time(exe, tmp_path):
     assert data[:2] == b"\xff\xd8"  # JPEG
     # SOF0 carries height then width: half of 240x320
     sof = data.index(b"\xff\xc0")
-    assert (int.from_bytes(data[sof + 5 : sof + 7], "big"), int.from_bytes(data[sof + 7 : sof + 9], "big")) == (120, 160)
+    assert (
+        int.from_bytes(data[sof + 5 : sof + 7], "big"),
+        int.from_bytes(data[sof + 7 : sof + 9], "big"),
+    ) == (120, 160)
 
 
 def test_only_the_newest_screenshots_are_kept(exe, tmp_path):
@@ -215,7 +218,9 @@ def test_an_empty_area_is_not_a_screenshot(exe, tmp_path):
     assert run(exe, "tv-shot", str(tmp_path), "5", "0", "0", "0", "0", "x")[0] == 4
 
 
-@pytest.mark.parametrize("args", [(), ("d", "5", "0", "0", "64", "64"), ("d", "x", "0", "0", "64", "64", "w")])
+@pytest.mark.parametrize(
+    "args", [(), ("d", "5", "0", "0", "64", "64"), ("d", "x", "0", "0", "64", "64", "w")]
+)
 def test_tv_shot_usage(exe, args):
     assert run(exe, "tv-shot", *args)[0] == USAGE
 
@@ -231,26 +236,48 @@ def test_a_mark_keeps_the_tails_and_the_last_screenshots(exe, tmp_path):
     trace = tmp_path / "trace.log"
     trace.write_bytes(b"old stuff\n" + b"x" * 100 + b"\nthe end\n")
     code, out = run(
-        exe, "mark", str(tmp_path / "marks"), str(shots), "3", "8",
-        "0", "0", "0", "0", "Minus and Plus", str(trace), str(tmp_path / "missing.log"),
-    )  # fmt: skip
+        exe,
+        "mark",
+        str(tmp_path / "marks"),
+        str(shots),
+        "3",
+        "8",
+        "0",
+        "0",
+        "0",
+        "0",
+        "Minus and Plus",
+        str(trace),
+        str(tmp_path / "missing.log"),
+    )
     assert code == 0
     mark = Path(out)
     assert mark.parent == tmp_path / "marks"
     assert (mark / "why.txt").read_text(encoding="utf-8").strip().endswith("Minus and Plus")
     assert (mark / "trace.log").read_bytes() == b"the end\n"
     assert not (mark / "missing.log").exists()
-    assert sorted(p.name for p in mark.glob("*.jpg")) == [f"2020010{n}-000000-000-press.jpg" for n in (2, 3, 4)]
+    assert sorted(p.name for p in mark.glob("*.jpg")) == [
+        f"2020010{n}-000000-000-press.jpg" for n in (2, 3, 4)
+    ]
 
 
 def test_a_mark_takes_a_screenshot_of_the_tv_first(exe, tmp_path):
     shots = tmp_path / "shots"
-    code, out = run(exe, "mark", str(tmp_path / "marks"), str(shots), "5", "100", "0", "0", "64", "64", "tray")
+    code, out = run(
+        exe, "mark", str(tmp_path / "marks"), str(shots), "5", "100", "0", "0", "64", "64", "tray"
+    )
     assert code == 0
     assert [p.name.endswith("-mark.jpg") for p in Path(out).glob("*.jpg")] == [True]
 
 
-@pytest.mark.parametrize("args", [(), ("m", "s", "x", "8", "0", "0", "0", "0", "why"), ("m", "s", "3", "8", "0", "0", "w", "0", "why")])
+@pytest.mark.parametrize(
+    "args",
+    [
+        (),
+        ("m", "s", "x", "8", "0", "0", "0", "0", "why"),
+        ("m", "s", "3", "8", "0", "0", "w", "0", "why"),
+    ],
+)
 def test_mark_usage(exe, args):
     assert run(exe, "mark", *args)[0] == USAGE
 
@@ -264,7 +291,15 @@ def silent_wav(path: Path) -> Path:
     data = b"\x00\x00" * frames
     fmt = (1).to_bytes(2, "little") + (1).to_bytes(2, "little") + rate.to_bytes(4, "little")
     fmt += (rate * 2).to_bytes(4, "little") + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
-    body = b"WAVE" + b"fmt " + len(fmt).to_bytes(4, "little") + fmt + b"data" + len(data).to_bytes(4, "little") + data
+    body = (
+        b"WAVE"
+        + b"fmt "
+        + len(fmt).to_bytes(4, "little")
+        + fmt
+        + b"data"
+        + len(data).to_bytes(4, "little")
+        + data
+    )
     path.write_bytes(b"RIFF" + len(body).to_bytes(4, "little") + body)
     return path
 
@@ -275,7 +310,9 @@ def test_the_banner_shows_and_closes_itself(exe):
 
 
 def test_the_chime_plays_a_wav(exe, tmp_path):
-    code = run(exe, "cue", "0", "0", "640", "480", "100", str(silent_wav(tmp_path / "s.wav")), "x")[0]
+    code = run(exe, "cue", "0", "0", "640", "480", "100", str(silent_wav(tmp_path / "s.wav")), "x")[
+        0
+    ]
     # 3 only where there is no audio device at all (a CI runner may have none)
     assert code in (0, 3)
 
@@ -286,7 +323,12 @@ def test_a_missing_chime_is_reported_not_a_crash(exe, tmp_path):
 
 @pytest.mark.parametrize(
     "args",
-    [(), ("0", "0", "640", "480", "50", "-"), ("0", "0", "0", "480", "50", "-", "x"), ("0", "0", "640", "480", "soon", "-", "x")],
+    [
+        (),
+        ("0", "0", "640", "480", "50", "-"),
+        ("0", "0", "0", "480", "50", "-", "x"),
+        ("0", "0", "640", "480", "soon", "-", "x"),
+    ],
 )
 def test_cue_usage(exe, args):
     assert run(exe, "cue", *args)[0] == USAGE

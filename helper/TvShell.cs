@@ -1509,6 +1509,7 @@ static class Program {
         if (mode == "uncovered") return Uncovered.Cli(args);
         if (mode == "app-exit") return AppExit.Cli(args);
         if (mode == "wait-out-kodi") return KodiLauncher.WaitOutCli(args);
+        if (mode == "kodi-restart") return KodiLauncher.RestartCli(args);
         if (mode == "pad-press") return Pad.Cli(args);
         if (mode == "pad-focus") return PadFocus.Cli(args);
         if (mode == "pad-target") return PadFocus.TargetCli(args);
@@ -1684,36 +1685,81 @@ static class KodiLauncher {
         { "gem",      "ActivateWindow(Videos,plugin://plugin.video.cbc/,return)" },
     };
     public static int Run(string target) {
+        Func<Process> StartKodi = () => {
+            try {
+                return Process.Start(new ProcessStartInfo(Cfg.KodiExe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(Cfg.KodiExe) });
+            } catch (Exception ex) { Cfg.Error("kodi launcher: cannot start " + Cfg.KodiExe + ": " + ex.Message); return null; }
+        };
+        Action<string> Open = t => {
+            if (t == "tv") {
+                // Resume the last-watched channel. PVR channels load a few seconds after start, so retry.
+                bool playing = false;
+                for (int i = 0; i < 15 && !(playing = IsPlaying()); i++) {
+                    var ch = LastChannel();
+                    if (ch > 0) { Rpc("Player.Open", "{\"item\":{\"channelid\":" + ch + "}}"); Cfg.Log("kodi launcher: playing channel " + ch); Thread.Sleep(6000); }
+                    else Thread.Sleep(2000);
+                }
+                if (!playing) Cfg.Warn("kodi launcher: no channel started playing after 15 tries");
+            } else if (Sections.ContainsKey(t)) {
+                Builtin("PlayerControl(Stop)"); Thread.Sleep(500);
+                Builtin(Sections[t]);
+            } else Cfg.Warn("kodi launcher: unknown section '" + t + "'");
+        };
         Process kodi = Process.GetProcessesByName("kodi").FirstOrDefault();
         bool started = false;
         if (kodi == null) {
-            try {
-                kodi = Process.Start(new ProcessStartInfo(Cfg.KodiExe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(Cfg.KodiExe) });
-            } catch (Exception ex) { Cfg.Error("kodi launcher: cannot start " + Cfg.KodiExe + ": " + ex.Message); return 1; }
+            if ((kodi = StartKodi()) == null) return 1;
             started = true;
         }
         Cfg.Log("kodi launcher: " + target + (started ? " (starting Kodi, pid " + kodi.Id + ")" : " (Kodi already running, pid " + kodi.Id + ")"));
         if (!WaitForKodi(60)) { Cfg.Error("kodi launcher: Kodi never answered on its JSON-RPC port 9090 within 60 s"); return 1; }
-        if (target == "tv") {
-            // Resume the last-watched channel. PVR channels load a few seconds after start, so retry.
-            bool playing = false;
-            for (int i = 0; i < 15 && !(playing = IsPlaying()); i++) {
-                var ch = LastChannel();
-                if (ch > 0) { Rpc("Player.Open", "{\"item\":{\"channelid\":" + ch + "}}"); Cfg.Log("kodi launcher: playing channel " + ch); Thread.Sleep(6000); }
-                else Thread.Sleep(2000);
-            }
-            if (!playing) Cfg.Warn("kodi launcher: no channel started playing after 15 tries");
-        } else if (Sections.ContainsKey(target)) {
-            Builtin("PlayerControl(Stop)"); Thread.Sleep(500);
-            Builtin(Sections[target]);
-        } else Cfg.Warn("kodi launcher: unknown section '" + target + "'");
+        Open(target);
         // The helper is the one witness of how Kodi ends (crash log, ERROR); this is the tile's record.
-        if (started) {
-            if (WaitOut(kodi, Cfg.KodiLog, HungAfterExitSeconds)) Cfg.Log("kodi launcher: Kodi ended by the launcher, the tile ends");
-            else Cfg.Log("kodi launcher: Kodi exited (" + Cfg.ExitOf(kodi) + "), the tile ends");
+        // Only the launcher that started Kodi is its parent, so only it waits and restarts it.
+        if (!started) return 0;
+        var restarts = new List<DateTime>();
+        while (true) {
+            if (WaitOut(kodi, Cfg.KodiLog, HungAfterExitSeconds)) { Cfg.Log("kodi launcher: Kodi ended by the launcher, the tile ends"); return 0; }
+            string how = Cfg.ExitOf(kodi);
+            int code; try { code = kodi.ExitCode; } catch { code = 0; }
+            restarts.RemoveAll(t => DateTime.Now - t > RestartWindow);
+            var kind = AppExit.Judge(code, Cfg.KodiLog, Cfg.KodiExitedLine);
+            if (!ShouldRestart(kind, restarts.Count)) {
+                if (kind == AppExit.Kind.Crashed)
+                    Cfg.Warn("kodi launcher: Kodi crashed (" + how + ") again after " + restarts.Count + " restarts in "
+                        + (int)RestartWindow.TotalMinutes + " min -> left down, the tile ends");
+                else Cfg.Log("kodi launcher: Kodi exited (" + how + "), the tile ends");
+                return 0;
+            }
+            // Let the helper copy Kodi's log aside first: Kodi's next start overwrites it.
+            Cfg.Log("kodi launcher: Kodi crashed (" + how + ") -> restarting it in " + RestartDelaySeconds + " s");
+            Thread.Sleep(RestartDelaySeconds * 1000);
+            restarts.Add(DateTime.Now);
+            kodi.Dispose();
+            if ((kodi = StartKodi()) == null) return 1;
+            Cfg.Log("kodi launcher: " + target + " (restarted Kodi, pid " + kodi.Id + ")");
+            if (!WaitForKodi(60)) { Cfg.Error("kodi launcher: restarted Kodi never answered on its JSON-RPC port 9090 within 60 s"); }
+            else Open(target);
         }
-        return 0;
     }
+
+    // A crash mid-programme (not Kodi's own crash after it finished shutting down, which means it
+    // was closed) restarts Kodi, and the tile resumes what it opened. A Kodi crashing over and over
+    // is left down after MaxRestarts in RestartWindow, so a stream that crashes it is not retried forever.
+    const int MaxRestarts = 3, RestartDelaySeconds = 5;
+    static readonly TimeSpan RestartWindow = TimeSpan.FromMinutes(15);
+    public static bool ShouldRestart(AppExit.Kind kind, int restartsInWindow) {
+        return kind == AppExit.Kind.Crashed && restartsInWindow < MaxRestarts;
+    }
+
+    // `TvShell.exe kodi-restart <exit code> <log> <restarts in the window>`: ShouldRestart for that
+    // exit, judged against that log; exits 1 to restart, 0 not to, 254 on bad arguments.
+    public static int RestartCli(string[] args) {
+        int code, n;
+        if (args.Length != 4 || !int.TryParse(args[1], out code) || !int.TryParse(args[3], out n) || n < 0) return 254;
+        return ShouldRestart(AppExit.Judge(code, args[2], Cfg.KodiExitedLine), n) ? 1 : 0;
+    }
+
 
     // Kodi 21.3 can hang in its last teardown after logging that it has finished (once for 13 hours,
     // crashing at the end), and Steam counts the tile as running for as long as it lingers. So once

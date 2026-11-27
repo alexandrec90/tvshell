@@ -101,6 +101,12 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
   owner turned that off for Kodi: a programme is listened to behind the game, and stopping
   it cut that off. Each such crash shows up in the health check; do not turn the guard
   back on without asking.
+- **A Kodi crash mid-programme restarts Kodi** (`KodiLauncher.ShouldRestart`). The launcher
+  that started Kodi is its parent, so it restarts it (Steam Input keeps following it) and
+  reopens what its tile opened, the last channel for Live TV. It waits 5 s first so the
+  helper can copy the crash log aside, and gives up after three restarts in 15 minutes. A
+  crash after Kodi's own last log line is a close and is not restarted. The crash is
+  still an ERROR in the health check.
 - **The BackWhenTV app reads only the keyboard**, and Steam Input's keyboard bindings did
   not reach its web player's window either, so the helper turns controller presses into
   keys itself (`PadKeys`), only while the app has focus. Its tile keeps Steam's default

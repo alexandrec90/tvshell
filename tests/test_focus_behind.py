@@ -103,7 +103,13 @@ def test_a_focus_that_has_settled_behind_moves_to_the_window_on_top(exe):
 
 @pytest.mark.parametrize(
     "args",
-    [(), ("1", "2", "3"), ("1", "2", "3", "x"), ("1", "2", "3", "4", "2"), ("1", "2", "3", "4", "0", "0")],
+    [
+        (),
+        ("1", "2", "3"),
+        ("1", "2", "3", "x"),
+        ("1", "2", "3", "4", "2"),
+        ("1", "2", "3", "4", "0", "0"),
+    ],
 )
 def test_uncovered_usage(exe, args):
     assert run(exe, "uncovered", *args) == USAGE
