@@ -31,7 +31,10 @@ Steam tile and the desktop shortcut point at `~/TvShell/TvShell.exe`, so a check
 move or be deleted without breaking the TV. `python -m tvshell.deploy` builds the helper
 from `helper/` and swaps it in; a launcher still running from the old exe (a game or
 Kodi in progress) keeps running. A deploy from a branch puts back a helper without what
-other branches merged, so the scheduled `scripts/e2e.py` installs the merged one afterwards.
+other branches merged, so devkit's scheduled job installs `origin/main`'s helper through
+`scripts/deploy.py` within the half hour of a merge, idle PC or not, from a tree of its
+own whatever branch the checkout is on; `scripts/e2e.py` installing it after its tests
+is the fallback.
 
 The install directory also holds runtime state the helper owns: the YouTube Chrome
 profile (`yt-profile/`), `steam-gameid.txt`, and its log under
