@@ -172,7 +172,15 @@ NO_TARGET, TO_GAME, TO_APP, TO_BIG_PICTURE = 0, 1, 2, 3  # PadFocus.Target
         # over Kodi, Steam focused the store launcher's window on the desk; the press went to
         # Kodi, and the game's menu opened unseen behind it, taking every press.
         ("1", "1", "1", "1", "1", TO_GAME, "Steam switching to the game from its menu"),
-        ("1", "0", "1", "1", "1", TO_APP, "the game is on the desk: Steam's switch is not the TV's"),
+        (
+            "1",
+            "0",
+            "1",
+            "1",
+            "1",
+            TO_APP,
+            "the game is on the desk: Steam's switch is not the TV's",
+        ),
         ("0", "0", "1", "1", "1", TO_APP, "the store launcher with no game running"),
     ],
 )
