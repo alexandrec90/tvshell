@@ -156,27 +156,36 @@ NO_TARGET, TO_GAME, TO_APP, TO_BIG_PICTURE = 0, 1, 2, 3  # PadFocus.Target
 
 
 @pytest.mark.parametrize(
-    ("game", "game_on_tv", "app", "app_used_last", "expected", "why"),
+    ("game", "game_on_tv", "app", "app_used_last", "launcher_now", "expected", "why"),
     [
         # Regression: watching Kodi with the game on the TV behind it, focus wandered to the
         # desk (the game's store launcher, the taskbar) and the next press handed it to the game,
         # which covered Kodi; its covered-video guard then stopped the channel.
-        ("1", "1", "1", "1", TO_APP, "back to the TV app that was being used"),
-        ("1", "1", "1", "0", TO_GAME, "back to the game that was being played"),
-        ("1", "1", "0", "1", TO_GAME, "the TV app used last has closed"),
-        ("0", "0", "1", "0", TO_APP, "only a TV app"),
-        ("1", "0", "1", "0", TO_APP, "the game is on the desk"),
-        ("1", "0", "0", "0", NO_TARGET, "only the game, on the desk: focus stays"),
-        ("0", "0", "0", "1", TO_BIG_PICTURE, "nothing running"),
+        ("1", "1", "1", "1", "0", TO_APP, "back to the TV app that was being used"),
+        ("1", "1", "1", "0", "0", TO_GAME, "back to the game that was being played"),
+        ("1", "1", "0", "1", "0", TO_GAME, "the TV app used last has closed"),
+        ("0", "0", "1", "0", "0", TO_APP, "only a TV app"),
+        ("1", "0", "1", "0", "0", TO_APP, "the game is on the desk"),
+        ("1", "0", "0", "0", "0", NO_TARGET, "only the game, on the desk: focus stays"),
+        ("0", "0", "0", "1", "0", TO_BIG_PICTURE, "nothing running"),
+        # Regression (marks 20261128-000952 and -001532): picking the game in Steam's menu
+        # over Kodi, Steam focused the store launcher's window on the desk; the press went to
+        # Kodi, and the game's menu opened unseen behind it, taking every press.
+        ("1", "1", "1", "1", "1", TO_GAME, "Steam switching to the game from its menu"),
+        ("1", "0", "1", "1", "1", TO_APP, "the game is on the desk: Steam's switch is not the TV's"),
+        ("0", "0", "1", "1", "1", TO_APP, "the store launcher with no game running"),
     ],
 )
 def test_a_press_from_the_desk_returns_to_what_was_used_on_the_tv(
-    exe, game, game_on_tv, app, app_used_last, expected, why
+    exe, game, game_on_tv, app, app_used_last, launcher_now, expected, why
 ):
-    assert run(exe, "pad-target", game, game_on_tv, app, app_used_last) == expected, why
+    args = (game, game_on_tv, app, app_used_last, launcher_now)
+    assert run(exe, "pad-target", *args) == expected, why
 
 
-@pytest.mark.parametrize("args", [(), ("1", "1", "1"), ("1", "1", "1", "x")])
+@pytest.mark.parametrize(
+    "args", [(), ("1", "1", "1"), ("1", "1", "1", "1"), ("1", "1", "1", "1", "x")]
+)
 def test_pad_target_usage(exe, args):
     assert run(exe, "pad-target", *args) == USAGE
 
