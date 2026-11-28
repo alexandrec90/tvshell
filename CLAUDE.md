@@ -87,6 +87,10 @@ argument is a launcher a Steam tile runs. The non-obvious constraints:
   Kodi in front of it, unseen, taking every press. So Home with the tile-started game behind
   something on the TV raises the game (`SteamMenu`). Read `gamepadoverlay_uid<overlay pid>` in
   Steam's `logs/webhelper.txt` to see which app's menu opened.
+- **Steam switches to the game by focusing the store launcher's window**, the first of the
+  tile's process tree, on the desk, not the game's. A press that finds the store launcher
+  focused within the last two seconds therefore goes to the game (`PadFocus.Pick`); handing
+  it to the TV app used last kept Kodi in front with the game's menu open unseen behind it.
 - **Steam hides Big Picture while a game runs**; that is not "closed". Reopening it then
   covers the game with a black screen.
 - **Steam's window can end up focused and black over the game or TV app**: after its menu

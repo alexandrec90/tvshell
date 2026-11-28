@@ -650,23 +650,29 @@ static class PadFocus {
     // the game over Kodi, whose covered-video guard then stopped the channel being watched.
     // Otherwise the game when it is on the TV, then the TV app; a game on the desk keeps focus
     // where it is, and with neither, Big Picture.
+    // Except when the game's store launcher has only just taken focus (`launcherJustFocused`):
+    // that is Steam switching to the game from its menu in the TV app. Steam activates the first
+    // window of the game tile's process tree, the store launcher's on the desk, not the game's,
+    // and handing that press to the TV app put Kodi back in front with the game's menu open
+    // unseen behind it, taking every press (marks 20261128-000952 and -001532).
     public enum Target { None = 0, Game = 1, App = 2, BigPicture = 3 }
-    public static Target Pick(bool game, bool gameOnTv, bool app, bool appUsedLast) {
+    public static Target Pick(bool game, bool gameOnTv, bool app, bool appUsedLast, bool launcherJustFocused) {
+        if (game && gameOnTv && launcherJustFocused) return Target.Game;
         if (app && appUsedLast) return Target.App;
         if (game && gameOnTv) return Target.Game;
         if (app) return Target.App;
         return game ? Target.None : Target.BigPicture;
     }
-    // `TvShell.exe pad-target <game> <game on tv> <app> <app used last>`, each 0 or 1: exits with
-    // the Target, 254 on bad arguments.
+    // `TvShell.exe pad-target <game> <game on tv> <app> <app used last> <launcher just focused>`,
+    // each 0 or 1: exits with the Target, 254 on bad arguments.
     public static int TargetCli(string[] args) {
-        if (args.Length != 5) return 254;
-        var b = new bool[4];
-        for (int i = 0; i < 4; i++) {
+        if (args.Length != 6) return 254;
+        var b = new bool[5];
+        for (int i = 0; i < 5; i++) {
             if (args[i + 1] == "1") b[i] = true;
             else if (args[i + 1] != "0") return 254;
         }
-        return (int)Pick(b[0], b[1], b[2], b[3]);
+        return (int)Pick(b[0], b[1], b[2], b[3], b[4]);
     }
 
     // Pure: after focus moves to a window, was a TV app (not the game) the last of the two used?
@@ -2380,7 +2386,13 @@ class Helper : Form {
         IntPtr target = IntPtr.Zero;
         var game = GameWindow();
         var kodi = TvAppWindow();
-        var pick = PadFocus.Pick(game != IntPtr.Zero, gameScreen == "tv", kodi != IntPtr.Zero, tvAppUsedLast);
+        // The store launcher's window just focused: Steam switching to the game from its menu.
+        bool launcherJustFocused = false;
+        if (freshAtPress && Game.LauncherProcess.Length > 0) {
+            uint fromPid; N.GetWindowThreadProcessId(from, out fromPid);
+            try { using (var p = Process.GetProcessById((int)fromPid)) launcherJustFocused = string.Equals(p.ProcessName, Game.LauncherProcess, StringComparison.OrdinalIgnoreCase); } catch { }
+        }
+        var pick = PadFocus.Pick(game != IntPtr.Zero, gameScreen == "tv", kodi != IntPtr.Zero, tvAppUsedLast, launcherJustFocused);
         if (pick == PadFocus.Target.Game) target = game;
         else if (pick == PadFocus.Target.App) target = kodi;
         else if (pick == PadFocus.Target.None) { Trace.Write("press", "left alone: focus is on the desk and the game is on the desk too" + at); return; }
